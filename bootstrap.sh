@@ -17,12 +17,12 @@ if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
   fi
 fi
 
-remote=https://github.com/shah/ergonex.git
+remote=https://github.com/shah/workstation.git
 ref="$(git ls-remote --exit-code "$remote" refs/heads/main)"
 revision="${ref%%[[:space:]]*}"
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
-scratch="$(mktemp -d)"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/workstation.auto.bootstrap-XXXXXX")"
 trap 'rm -rf -- "$scratch"' EXIT
-curl -fsSL "https://codeload.github.com/shah/ergonex/tar.gz/$revision" -o "$scratch/source.tar.gz"
-tar -xzf "$scratch/source.tar.gz" -C "$scratch" --strip-components=1
+curl -fsSL "https://codeload.github.com/shah/workstation/tar.gz/$revision" -o "$scratch/source.auto.tar.gz"
+tar -xzf "$scratch/source.auto.tar.gz" -C "$scratch" --strip-components=1
 bun "$scratch/snshah.ts" apply "$@"
