@@ -21,7 +21,10 @@ err()  { echo -e "${RED}${BOLD}[error]${RESET} $1" >&2; exit 1; }
 REPO_URL="https://github.com/shah/ergonex.git"
 RAW_BASE="https://raw.githubusercontent.com/shah/ergonex/main"
 ERGONEX_WS="$HOME/workspaces/github.com/shah/ergonex"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=""
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 # ------------------------------------------------------------------------------
 # 1. Verify Omarchy Environment
@@ -54,11 +57,13 @@ case "$ARCH" in
   *) err "Unsupported CPU architecture for Oh My Posh: $ARCH" ;;
 esac
 
-curl -fsSL "https://github.com/JanDeDobbeleer/oh-my-posh/releases/latest/download/${OMP_BIN}" -o "$HOME/.local/bin/oh-my-posh"
-chmod +x "$HOME/.local/bin/oh-my-posh"
+if [[ ! -x "$HOME/.local/bin/oh-my-posh" ]]; then
+  curl -fsSL "https://github.com/JanDeDobbeleer/oh-my-posh/releases/latest/download/${OMP_BIN}" -o "$HOME/.local/bin/oh-my-posh"
+  chmod +x "$HOME/.local/bin/oh-my-posh"
+fi
 
 mkdir -p "$HOME/.config/oh-my-posh"
-if [[ -f "$SCRIPT_DIR/ergonex.omp.json" ]]; then
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/ergonex.omp.json" ]]; then
   cp "$SCRIPT_DIR/ergonex.omp.json" "$HOME/.config/oh-my-posh/ergonex.omp.json"
 else
   curl -fsSL "${RAW_BASE}/ergonex.omp.json" -o "$HOME/.config/oh-my-posh/ergonex.omp.json"
@@ -122,7 +127,7 @@ fi
 
 if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
   log "Starting Ollama service..."
-  if systemctl list-unit-files | grep -q '^ollama\.service'; then
+  if systemctl list-unit-files ollama.service --no-legend | grep '^ollama\.service' >/dev/null; then
     sudo systemctl enable --now ollama.service
   else
     nohup ollama serve >/tmp/ollama-serve.log 2>&1 &
@@ -133,8 +138,10 @@ if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
   done
 fi
 
-log "Pulling ${BEST_MODEL} via Ollama..."
-ollama pull "$BEST_MODEL"
+if ! ollama show "$BEST_MODEL" >/dev/null 2>&1; then
+  log "Pulling ${BEST_MODEL} via Ollama..."
+  ollama pull "$BEST_MODEL"
+fi
 ok "Model ${BEST_MODEL} is ready locally."
 
 # ------------------------------------------------------------------------------
@@ -192,7 +199,9 @@ ok "OpenCode configured with local model ollama/${BEST_MODEL}."
 # 7. Install Herdr, Herdr Desktop, and Custom Ergonex Layout
 # ------------------------------------------------------------------------------
 log "Installing Herdr and Herdr Desktop..."
-curl -fsSL https://releases.herdr.dev/app/install.sh | sh
+if ! command -v herdr >/dev/null 2>&1 || ! command -v herdr-app >/dev/null 2>&1; then
+  curl -fsSL https://releases.herdr.dev/app/install.sh | sh
+fi
 
 if command -v herdr >/dev/null 2>&1; then
   herdr integration install opencode 2>/dev/null || true
@@ -214,12 +223,14 @@ fi
 
 # Install helper scripts (vault-sync.sh & herdr-workspace.sh) into ~/.local/bin
 for helper in vault-sync.sh herdr-workspace.sh; do
-  if [[ -f "$SCRIPT_DIR/$helper" ]]; then
+  if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/$helper" ]]; then
     cp "$SCRIPT_DIR/$helper" "$HOME/.local/bin/$helper"
   else
     curl -fsSL "${RAW_BASE}/${helper}" -o "$HOME/.local/bin/$helper" 2>/dev/null || true
   fi
-  [[ -f "$HOME/.local/bin/$helper" ]] && chmod +x "$HOME/.local/bin/$helper"
+  if [[ -f "$HOME/.local/bin/$helper" ]]; then
+    chmod +x "$HOME/.local/bin/$helper"
+  fi
 done
 
 # ------------------------------------------------------------------------------
@@ -227,7 +238,9 @@ done
 # ------------------------------------------------------------------------------
 log "Installing Microsoft Edge and setting it as the default browser..."
 if command -v omarchy >/dev/null 2>&1; then
-  omarchy install browser edge 2>/dev/null || yay -S --noconfirm --needed microsoft-edge-stable-bin
+  if ! command -v microsoft-edge-stable >/dev/null 2>&1; then
+    omarchy install browser edge 2>/dev/null || yay -S --noconfirm --needed microsoft-edge-stable-bin
+  fi
   omarchy default browser microsoft-edge 2>/dev/null || xdg-settings set default-web-browser microsoft-edge.desktop 2>/dev/null || true
 else
   yay -S --noconfirm --needed microsoft-edge-stable-bin
@@ -244,7 +257,7 @@ Version=1.0
 Name=Microsoft Edge (Work)
 GenericName=Work Web Browser
 Comment=Isolated Microsoft Edge profile for Work M365, Teams, and Outlook
-Exec=microsoft-edge-stable --user-data-dir=${EDGE_WORK_DIR} %U
+Exec=microsoft-edge-stable --user-data-dir="${EDGE_WORK_DIR}" %U
 Terminal=false
 Icon=microsoft-edge
 Type=Application
@@ -280,12 +293,9 @@ install_webapp() {
   local name="$1"
   local url="$2"
   local extra_args="${3:-}"
-  if command -v omarchy-webapp-install >/dev/null 2>&1; then
-    omarchy-webapp-install "$name" "$url" "" "" "$extra_args" 2>/dev/null || true
-  else
-    local slug
-    slug=$(echo "$name" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')
-    cat > "$HOME/.local/share/applications/webapp-${slug}.desktop" <<EOF
+  local slug
+  slug=$(echo "$name" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')
+  cat > "$HOME/.local/share/applications/webapp-${slug}.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=${name}
@@ -294,7 +304,6 @@ Terminal=false
 Type=Application
 Categories=Network;
 EOF
-  fi
 }
 
 # Personal Web Apps
@@ -308,8 +317,8 @@ install_webapp "WhatsApp" "https://web.whatsapp.com"
 install_webapp "ChatGPT" "https://chatgpt.com"
 
 # Isolated Work Profile Web Apps
-install_webapp "Outlook Work" "https://outlook.office.com" "--user-data-dir=${EDGE_WORK_DIR}"
-install_webapp "Microsoft Teams" "https://teams.microsoft.com" "--user-data-dir=${EDGE_WORK_DIR}"
+install_webapp "Outlook Work" "https://outlook.office.com" "--user-data-dir=\"${EDGE_WORK_DIR}\""
+install_webapp "Microsoft Teams" "https://teams.microsoft.com" "--user-data-dir=\"${EDGE_WORK_DIR}\""
 install_webapp "OneDrive" "https://onedrive.live.com"
 
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
@@ -318,43 +327,57 @@ ok "Web apps installed (available in Super + Space launcher)."
 # ------------------------------------------------------------------------------
 # 10. Configure Custom Hyprland Keybindings
 # ------------------------------------------------------------------------------
-HYPR_BINDINGS="$HOME/.config/hypr/bindings.conf"
-if [[ -d "$HOME/.config/hypr" ]]; then
+HYPR_DIR="$HOME/.config/hypr"
+if [[ -d "$HYPR_DIR" ]]; then
+  HYPR_BINDINGS="$HYPR_DIR/bindings.conf"
+  comment_prefix="#"
+  if [[ -f "$HYPR_DIR/hyprland.lua" ]]; then
+    HYPR_BINDINGS="$HYPR_DIR/bindings.lua"
+    comment_prefix="--"
+  fi
+
+  start_marker="$comment_prefix >>> ERGONEX KEYBINDINGS >>>"
+  end_marker="$comment_prefix <<< ERGONEX KEYBINDINGS <<<"
   touch "$HYPR_BINDINGS"
-  # Remove existing block if re-running bootstrap.sh
-  sed -i '/# >>> ERGONEX KEYBINDINGS >>>/,/# <<< ERGONEX KEYBINDINGS <<</d' "$HYPR_BINDINGS"
+  sed -i "/^$start_marker$/,/^$end_marker$/d" "$HYPR_BINDINGS"
 
-  cat >> "$HYPR_BINDINGS" <<EOF
+  {
+    printf '%s\n' "$start_marker"
+    while IFS='|' read -r modifiers key description command; do
+      if [[ "$HYPR_BINDINGS" == *.lua ]]; then
+        keys="${modifiers// / + } + $key"
+        printf 'o.rebind("%s", "%s", [[%s]])\n' "$keys" "$description" "$command"
+      else
+        printf 'bindd = %s, %s, %s, exec, %s\n' "$modifiers" "$key" "$description" "${command//\$HOME/$HOME}"
+      fi
+    done <<'BINDINGS'
+SUPER SHIFT|B|Microsoft Edge (Personal)|microsoft-edge-stable
+SUPER SHIFT|E|VS Code|code
+SUPER SHIFT|H|Herdr Desktop|herdr-workspace.sh
+SUPER SHIFT|G|Gmail|microsoft-edge-stable --app=https://mail.google.com
+SUPER SHIFT|O|Outlook Personal|microsoft-edge-stable --app=https://outlook.live.com
+SUPER SHIFT|F|Cloudflare|microsoft-edge-stable --app=https://dash.cloudflare.com
+SUPER SHIFT|U|UniFi Site Manager|microsoft-edge-stable --app=https://unifi.ui.com
+SUPER SHIFT|D|Discord|discord
+SUPER SHIFT|S|Spotify|spotify-launcher
+SUPER SHIFT|W|WhatsApp|microsoft-edge-stable --app=https://web.whatsapp.com
+SUPER SHIFT|A|ChatGPT|microsoft-edge-stable --app=https://chatgpt.com
+SUPER SHIFT|C|Claude Desktop|claude-desktop
+SUPER SHIFT|K|Ente Auth (2FA)|ente_auth
+SUPER ALT|B|Microsoft Edge (Work)|microsoft-edge-stable --user-data-dir="$HOME/.local/share/edge-work-profile"
+SUPER ALT|O|Outlook Work|microsoft-edge-stable --user-data-dir="$HOME/.local/share/edge-work-profile" --app=https://outlook.office.com
+SUPER ALT|T|Microsoft Teams|microsoft-edge-stable --user-data-dir="$HOME/.local/share/edge-work-profile" --app=https://teams.microsoft.com
+SUPER ALT|D|OneDrive Web|microsoft-edge-stable --app=https://onedrive.live.com
+BINDINGS
+    printf '%s\n' "$end_marker"
+  } >> "$HYPR_BINDINGS"
 
-# >>> ERGONEX KEYBINDINGS >>>
-# Personal & Native Apps (Super + Shift + Key)
-bindd = SUPER SHIFT, B, Microsoft Edge (Personal), exec, microsoft-edge-stable
-bindd = SUPER SHIFT, E, VS Code, exec, code
-bindd = SUPER SHIFT, H, Herdr Desktop, exec, herdr-workspace.sh
-bindd = SUPER SHIFT, G, Gmail, exec, microsoft-edge-stable --app=https://mail.google.com
-bindd = SUPER SHIFT, O, Outlook Personal, exec, microsoft-edge-stable --app=https://outlook.live.com
-bindd = SUPER SHIFT, F, Cloudflare, exec, microsoft-edge-stable --app=https://dash.cloudflare.com
-bindd = SUPER SHIFT, U, UniFi Site Manager, exec, microsoft-edge-stable --app=https://unifi.ui.com
-bindd = SUPER SHIFT, D, Discord, exec, discord
-bindd = SUPER SHIFT, S, Spotify, exec, spotify-launcher
-bindd = SUPER SHIFT, W, WhatsApp, exec, microsoft-edge-stable --app=https://web.whatsapp.com
-bindd = SUPER SHIFT, A, ChatGPT, exec, microsoft-edge-stable --app=https://chatgpt.com
-bindd = SUPER SHIFT, C, Claude Desktop, exec, claude-desktop
-bindd = SUPER SHIFT, K, Ente Auth (2FA), exec, ente_auth
-
-# Isolated Work Profile Apps (Super + Alt + Key)
-bindd = SUPER ALT, B, Microsoft Edge (Work), exec, microsoft-edge-stable --user-data-dir=${EDGE_WORK_DIR}
-bindd = SUPER ALT, O, Outlook Work, exec, microsoft-edge-stable --user-data-dir=${EDGE_WORK_DIR} --app=https://outlook.office.com
-bindd = SUPER ALT, T, Microsoft Teams, exec, microsoft-edge-stable --user-data-dir=${EDGE_WORK_DIR} --app=https://teams.microsoft.com
-bindd = SUPER ALT, D, OneDrive Web, exec, microsoft-edge-stable --app=https://onedrive.live.com
-# <<< ERGONEX KEYBINDINGS <<<
-EOF
-
-  if ! grep -q "bindings.conf" "$HOME/.config/hypr/hyprland.conf" 2>/dev/null; then
-    echo "source = ~/.config/hypr/bindings.conf" >> "$HOME/.config/hypr/hyprland.conf"
+  if [[ "$HYPR_BINDINGS" == *.conf ]] &&
+      ! grep -Eq '^[[:space:]]*source[[:space:]]*=.*bindings\.conf[[:space:]]*$' "$HYPR_DIR/hyprland.conf" 2>/dev/null; then
+    printf '\n%s\n' 'source = ~/.config/hypr/bindings.conf' >> "$HYPR_DIR/hyprland.conf"
   fi
   hyprctl reload >/dev/null 2>&1 || true
-  ok "Custom Hyprland keybindings added to ~/.config/hypr/bindings.conf"
+  ok "Custom Hyprland keybindings added to $HYPR_BINDINGS"
 fi
 
 # ------------------------------------------------------------------------------
@@ -401,7 +424,7 @@ Whenever cloning, initializing, or organizing Git repositories (GitHub, GitLab, 
 
 ### Rules for Repository Operations
 1. **Never clone repositories directly into \`~\`, \`~/Desktop\`, or \`~/Downloads\`.** Always resolve the canonical host + path and clone into \`~/workspaces/<host>/<namespace>/<repo>\`.
-2. **Multi-Repo `.code-workspace` Monorepos:** When grouping multiple repositories across GitHub or GitLab into a single VS Code workspace, store `<name>.code-workspace` at \`~/workspaces/<name>.code-workspace\` using relative paths (e.g., \`github.com/shah/ergonex\`) so workspaces remain 100% portable.
+2. **Multi-Repo \`.code-workspace\` Monorepos:** When grouping multiple repositories across GitHub or GitLab into a single VS Code workspace, store \`<name>.code-workspace\` at \`~/workspaces/<name>.code-workspace\` using relative paths (e.g., \`github.com/shah/ergonex\`) so workspaces remain 100% portable.
 3. **Verify Before Cloning:** Check if \`~/workspaces/<host>/<namespace>/<repo>\` already exists; if present, run \`git fetch --all --prune\` and report status rather than duplicating clones.
 
 ---
@@ -445,7 +468,7 @@ Whenever cloning, initializing, or organizing Git repositories (GitHub, GitLab, 
 - **Isolated Work Browser:** Microsoft Edge Work (\`~/.local/share/edge-work-profile\`) — Isolated Entra ID / M365 session for Outlook Work and Teams.
 - **Local 2FA Authenticator:** Ente Auth (\`ente_auth\`) for desktop TOTP codes alongside mobile Microsoft Authenticator.
 - **OneDrive Sync:** \`onedrive\` (\`onedrive-abraunegg\`) for local \`~/OneDrive\` folder synchronization + \`vault-sync.sh\` for encrypted private config snapshots.
-- **Hyprland Shortcuts (\`~/.config/hypr/bindings.conf\`):**
+- **Hyprland Shortcuts:**
   - \`Super + Shift + B\` Edge (Personal) | \`Super + Alt + B\` Edge (Work)
   - \`Super + Shift + E\` VS Code | \`Super + Shift + H\` Herdr Desktop
   - \`Super + Shift + G\` Gmail | \`Super + Shift + O\` Outlook Personal | \`Super + Alt + O\` Outlook Work
@@ -467,8 +490,8 @@ When asked to prepare this PC using \`~/AGENTS.md\`, work through these phases s
 5. **Optional Cloud Harnesses:** Assist with interactive login for \`claude\` (\`cx\`) and \`codex\` (\`cy\`) if requested.
 EOF
 
-ln -sf "$HOME/AGENTS.md" "$HOME/.claude/CLAUDE.md"
-ln -sf "$HOME/AGENTS.md" "$HOME/.codex/AGENTS.md"
+ln -sfnT "$HOME/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+ln -sfnT "$HOME/AGENTS.md" "$HOME/.codex/AGENTS.md"
 
 ok "Generated $HOME/AGENTS.md and linked it for OpenCode, Claude Code, and Codex."
 

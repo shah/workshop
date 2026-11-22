@@ -14,6 +14,12 @@ Run this on a fresh or factory-reset Omarchy installation (`Super + Alt + Space`
 curl -fsSL https://raw.githubusercontent.com/shah/ergonex/main/bootstrap.sh | bash
 ```
 
+### Bootstrap acceptance test
+
+On a fresh Omarchy test machine, run the command above as your normal desktop user. Confirm it exits successfully and prints **Ergonex Bootstrap Complete!**. Run the same command again and confirm it completes without adding duplicate prompt initialization lines, Hyprland bindings, or desktop launchers. The second run should reuse the installed Oh My Posh binary and downloaded Ollama model.
+
+You can also run `bash bootstrap.sh` from a local checkout to test the file-based entry point.
+
 ---
 
 ## What `bootstrap.sh` Configures
@@ -36,7 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/shah/ergonex/main/bootstrap.sh | ba
    - Enforces the `~/workspaces/<host>/<namespace>/<repo>` directory convention across all agents.
    - Documents Omarchy-native update/recovery rules and a 5-phase Machine Preparation Checklist.
 7. **Browsers, Apps & Hyprland Keybindings:**
-   - Installs **Microsoft Edge** as the default browser, provisions an isolated **Edge Work Profile**, installs native desktop apps + Omarchy web apps, and writes shortcuts to `~/.config/hypr/bindings.conf`.
+   - Installs **Microsoft Edge** as the default browser, provisions an isolated **Edge Work Profile**, installs native desktop apps + Omarchy web apps, and writes shortcuts to the active Hyprland bindings file.
 
 ---
 
@@ -117,7 +123,7 @@ Microsoft does not publish a native Linux desktop client for **Microsoft Authent
 
 ## Custom Hyprland Keybindings
 
-Configured in `~/.config/hypr/bindings.conf`:
+Configured in `~/.config/hypr/bindings.lua` on current Omarchy installations, or `~/.config/hypr/bindings.conf` on legacy installations.
 
 ### Personal & Native Apps (`Super + Shift + <Key>`)
 | Shortcut | Application |
