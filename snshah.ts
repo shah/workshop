@@ -5,8 +5,8 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, syml
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
-const tenants = ["work1", "work2", "work3"] as const;
-type Tenant = typeof tenants[number];
+type TenantFiles = { kind: "web" } | { kind: "rclone"; remote: string };
+type Tenant = { id: string; label: string; files: TenantFiles };
 const workApps = ["browser", "outlook", "calendar", "teams", "onedrive"] as const;
 type WorkApp = typeof workApps[number];
 const personalApps = ["gmail", "dot", "herdr", "menu"] as const;
@@ -22,9 +22,9 @@ type Command =
   | { kind: "doctor"; json: boolean }
   | { kind: "shell"; shell: "bash" | "zsh" }
   | { kind: "open"; app: PersonalApp }
-  | { kind: "work"; tenant: Tenant; app: WorkApp }
+  | { kind: "work"; tenant: string; app: WorkApp }
   | { kind: "agent"; agent: Agent; directory: string }
-  | { kind: "drive"; tenant: Tenant; action: "list" | "mount" }
+  | { kind: "drive"; tenant: string; action: "list" | "mount" }
   | { kind: "vault"; action: "status" | "backup" }
   | { kind: "restore" | "verify"; archive?: string; overwrite: boolean }
   | { kind: "config"; action: "edit" | "check" | "setup" }
@@ -45,14 +45,11 @@ const config = process.env.XDG_CONFIG_HOME || join(home, ".config");
 const data = process.env.XDG_DATA_HOME || join(home, ".local/share");
 const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
-const profileFile = join(profileDir, "profile.json");
 const assetDir = join(data, "snshah");
 const product = "Shahid Shah Workstation";
 const remote = "https://github.com/shah/workstation.git";
 const defaultWorkspaceRoot = join(home, "Work");
-const installConfig = join(profileDir, "install.auto.json");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
-const oldTheme = join(config, "oh-my-posh/ergonex.omp.json");
 const pluginId = "shah.workstation";
 const pluginDir = join(config, "omarchy/plugins", pluginId);
 const pluginFiles = {
@@ -91,7 +88,6 @@ Ui.Panel {
 } as const;
 const ollamaUrl = "http://127.0.0.1:11434";
 const defaultModel = "qwen3-coder:30b";
-const defaults = { work1: "Work 1", work2: "Work 2", work3: "Work 3" } satisfies Record<Tenant, string>;
 const urls: Record<WorkApp, string> = {
   browser: "https://www.microsoft365.com/",
   outlook: "https://outlook.office.com/mail/",
@@ -113,9 +109,9 @@ const usage = `Usage: snshah <command>
   doctor [--json]
   shell [bash|zsh]
   open gmail|dot|herdr|menu
-  open work1|work2|work3 [browser|outlook|calendar|teams|onedrive]
+  open TENANT [browser|outlook|calendar|teams|onedrive]
   agent claude|codex|local [directory]
-  drive list|mount work1|work2|work3
+  drive list|mount TENANT
   vault status|backup|verify|restore [archive] [--overwrite]
   config setup|check|edit|set-secret [VARIABLE]
   menu
@@ -155,11 +151,11 @@ function parse(argv: string[]): Command {
   if (kind === "shell" && !second && (!first || member(["bash", "zsh"], first))) return { kind, shell: first === "zsh" ? "zsh" : "bash" };
   if (kind === "context" && !first) return { kind };
   if (kind === "open" && !second && member(personalApps, first)) return { kind, app: first };
-  if (kind === "open" && !rest.length && member(tenants, first) && (!second || member(workApps, second)))
+  if (kind === "open" && !rest.length && validTenantId(first) && (!second || member(workApps, second)))
     return { kind: "work", tenant: first, app: member(workApps, second) ? second : "outlook" };
   if (kind === "agent" && !rest.length && member(agents, first))
     return { kind, agent: first, directory: resolve(second ?? process.cwd()) };
-  if (kind === "drive" && !rest.length && member(["list", "mount"], first) && member(tenants, second))
+  if (kind === "drive" && !rest.length && member(["list", "mount"], first) && validTenantId(second))
     return { kind, action: first, tenant: second };
   if (kind === "vault" && !second && member(["status", "backup"], first)) return { kind, action: first };
   if (kind === "vault" && (first === "restore" || first === "verify")) {
@@ -280,10 +276,11 @@ type Scope = typeof commandScopes[number];
 const configTypes = `export type Secret =
   | { variable: string; value: string; scope: "shell" }
   | { variable: string; value: string; scope: "command"; commands: readonly ("claude" | "codex" | "local" | "drive")[] };
+export type TenantFiles = { kind: "web" } | { kind: "rclone"; remote: string };
+export type Tenant = { id: string; label: string; files: TenantFiles };
 export type WorkstationConfig = {
   personal: string;
-  work: Record<"work1" | "work2" | "work3",
-    { label: string; files: { kind: "web" } | { kind: "rclone"; remote: string } }>;
+  work: readonly Tenant[];
   workspacesRoot: string;
   prompt: { kind: "starship" } | { kind: "posh" };
   browser: { kind: "omarchy" } | { kind: "edge-default" };
@@ -297,7 +294,7 @@ type Secret =
   | { variable: string; value: string; scope: "command"; commands: readonly Scope[] };
 type WorkstationConfig = {
   personal: string;
-  work: Record<Tenant, { label: string; files: { kind: "web" } | { kind: "rclone"; remote: string } }>;
+  work: readonly Tenant[];
   workspacesRoot: string;
   prompt: { kind: "starship" } | { kind: "posh" };
   browser: { kind: "omarchy" } | { kind: "edge-default" };
@@ -309,18 +306,32 @@ const endSecrets = "// <<< snshah secrets <<<";
 function validLabel(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= 64 && !/[\x00-\x1f\x7f/]/.test(value);
 }
+function validTenantId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z0-9-]{0,47}$/.test(value) &&
+    value !== "personal" && !member(personalApps, value);
+}
+
+function tenantById(current: WorkstationConfig, id: string): Tenant {
+  const tenant = current.work.find(profile => profile.id === id);
+  if (!tenant) throw new UsageError(`Unknown tenant ID: ${id}. Check the work list in snshah.conf.ts.`);
+  return tenant;
+}
+
 function validateConfig(v: unknown): asserts v is WorkstationConfig {
   if (!object(v)) throw new Error("Export a WorkstationConfig object.");
   if (!validLabel(v.personal)) throw new Error("Invalid personal profile label.");
-  if (!object(v.work)) throw new Error("Missing work profiles.");
-  for (const id of tenants) {
-    const p = v.work[id];
-    if (!object(p) || !validLabel(p.label) || !object(p.files) || !(p.files.kind === "web" ||
+  if (!Array.isArray(v.work)) throw new Error("Expected an ordered work tenant array.");
+  const ids = new Set<string>();
+  const labels = new Set<string>();
+  for (const [i, p] of v.work.entries()) {
+    if (!object(p) || !validTenantId(p.id) || !validLabel(p.label) || !object(p.files) || !(p.files.kind === "web" ||
       p.files.kind === "rclone" && typeof p.files.remote === "string" && /^[\w][\w .-]{0,63}$/.test(p.files.remote)))
-      throw new Error(`Invalid work profile: ${id}.`);
+      throw new Error(`Invalid work profile at index ${i}.`);
+    if (ids.has(p.id)) throw new Error(`Duplicate tenant ID: ${p.id}.`);
+    if (labels.has(p.label)) throw new Error(`Duplicate tenant label at index ${i}.`);
+    ids.add(p.id);
+    labels.add(p.label);
   }
-  if (new Set(tenants.map(id => (v.work as Record<Tenant, { label: string }>)[id].label)).size !== tenants.length)
-    throw new Error("Work profile labels must be distinct.");
   if (typeof v.workspacesRoot !== "string" || !isAbsolute(v.workspacesRoot) || /[\x00-\x1f]/.test(v.workspacesRoot))
     throw new Error("workspacesRoot must be an absolute path.");
   if (!object(v.prompt) || !member(["starship", "posh"], typeof v.prompt.kind === "string" ? v.prompt.kind : undefined))
@@ -366,22 +377,14 @@ async function interpretConfig(text: string): Promise<WorkstationConfig> {
   return result;
 }
 
-async function initialConfig(features?: Features): Promise<WorkstationConfig> {
-  const legacy = await read(profileFile);
-  const old = legacy ? JSON.parse(legacy) as { labels?: Record<Tenant, string>; model?: string } : {};
-  const legacyInstall = await read(installConfig);
-  const oldRoot = legacyInstall ? (JSON.parse(legacyInstall) as { workspacesRoot?: string }).workspacesRoot : undefined;
-  const work = Object.fromEntries(tenants.map(id => [id, {
-    label: old.labels?.[id] ?? defaults[id],
-    files: features?.sync ? { kind: "rclone", remote: `snshah-${id}` } : { kind: "web" },
-  }])) as WorkstationConfig["work"];
-  const hadLegacyPrompt = (await Promise.all([".bashrc", ".zshrc"].map(name => read(join(home, name)))))
-    .some(text => text?.includes("~/.config/oh-my-posh/ergonex.omp.json"));
-  return { personal: "Personal", work, workspacesRoot: features?.workspaceRoot ?? oldRoot ?? defaultWorkspaceRoot,
-    prompt: { kind: features?.posh || hadLegacyPrompt || await exists(theme) ? "posh" : "starship" },
+function initialConfig(features?: Features): WorkstationConfig {
+  return {
+    personal: "Personal", work: [], workspacesRoot: features?.workspaceRoot ?? defaultWorkspaceRoot,
+    prompt: { kind: features?.posh ? "posh" : "starship" },
     browser: { kind: features?.defaultEdge ? "edge-default" : "omarchy" },
-    localAI: features?.local || await exists(join(profileDir, "opencode.auto.json")) ? { kind: "ollama", model: old.model ?? defaultModel } : { kind: "off" },
-    secrets: [] };
+    localAI: features?.local ? { kind: "ollama", model: defaultModel } : { kind: "off" },
+    secrets: [],
+  };
 }
 
 function configSource(settings: WorkstationConfig): string {
@@ -481,7 +484,7 @@ async function workspaceRoot(override?: string): Promise<string> {
 function checkoutPath(root: string): string { return join(root, "github.com/shah/workstation"); }
 
 function knownWorkstationRemote(url: string | undefined): boolean {
-  return /^((https|ssh):\/\/(git@)?github\.com\/|git@github\.com:)shah\/(workstation|ergonex)(\.git)?$/.test(url ?? "");
+  return /^((https|ssh):\/\/(git@)?github\.com\/|git@github\.com:)shah\/workstation(\.git)?$/.test(url ?? "");
 }
 
 async function createCheckout(path: string): Promise<void> {
@@ -494,24 +497,20 @@ async function createCheckout(path: string): Promise<void> {
   } finally { await rm(staging, { recursive: true, force: true }); }
 }
 
-const appEntries = [
-  { name: `${product} Gmail`, url: "https://mail.google.com/", icon: "mail-message-new", args: "open gmail" },
-  { name: `${product} ChatGPT Dot`, url: "https://chatgpt.com/dots", icon: "system-help", args: "open dot" },
-  ...tenants.flatMap((tenant, i) => ([
-    { name: `${product} Outlook Work ${i + 1}`, url: urls.outlook, icon: "mail-message-new", args: `open ${tenant} outlook` },
-    { name: `${product} OneDrive Work ${i + 1}`, url: urls.onedrive, icon: "folder-remote", args: `open ${tenant} onedrive` },
-  ])),
-];
-
-const defaultVaultItems = [
-  ".ssh", ".gnupg", ".age", ".gitconfig.local", ".git-credentials", ".npmrc", ".pypirc", ".aws",
-  ".config/gh", ".config/onedrive", ".config/rclone", ".config/ente", ".config/opencode/opencode.json",
-  ".config/hypr/monitors.lua", ".config/hypr/input.lua", ".config/ergonex", ".config/snshah",
-];
+function appEntries(work: readonly Tenant[]) {
+  return [
+    { name: `${product} Gmail`, url: "https://mail.google.com/", icon: "mail-message-new", args: "open gmail" },
+    { name: `${product} ChatGPT Dot`, url: "https://chatgpt.com/dots", icon: "system-help", args: "open dot" },
+    ...work.flatMap(({ id }) => [
+      { name: `${product} Outlook (${id})`, url: urls.outlook, icon: "mail-message-new", args: `open ${id} outlook` },
+      { name: `${product} OneDrive (${id})`, url: urls.onedrive, icon: "folder-remote", args: `open ${id} onedrive` },
+    ]),
+  ];
+}
 
 async function plan(features: Features): Promise<Step[]> {
   if (!available("omarchy")) throw new Error("Run setup on Omarchy with omarchy on PATH.");
-  const current = await exists(conf) ? await settings() : await initialConfig(features);
+  const current = await exists(conf) ? await settings() : initialConfig(features);
   validateConfig(current);
   const steps: Step[] = [];
   async function file(path: string, content: string, options: { executable?: boolean; private?: boolean } = {}) {
@@ -534,19 +533,9 @@ async function plan(features: Features): Promise<Step[]> {
     throw new Error(`Expected the workstation checkout at ${checkout}. Choose another --workspaces-root if this path is in use.`);
 
 
-  const shellFiles = await Promise.all((["bash", "zsh"] as const).map(async shell => {
-    const path = join(home, `.${shell}rc`);
-    const content = await read(path) ?? "";
-    const legacy = 'export PATH="$HOME/.local/bin:$PATH"; eval "$(oh-my-posh init ' +
-      shell + ' --config ~/.config/oh-my-posh/ergonex.omp.json)"';
-    const lines = content.split("\n");
-    const legacyComment = "# Ergonex Oh My Posh (Human / Herdr / Agent aware)";
-    return { shell, path, hadLegacy: lines.includes(legacy),
-      userContent: lines.filter((line, i) => line !== legacy && !(line === legacyComment && lines[i + 1] === legacy)).join("\n") };
-  }));
-  if (features.posh || current.prompt.kind === "posh" || shellFiles.some(file => file.hadLegacy)) {
+  if (features.posh || current.prompt.kind === "posh") {
     const source = await read(join(import.meta.dir, "snshah.omp.json")) ??
-      await read(join(checkout, "snshah.omp.json")) ?? await read(theme) ?? await read(oldTheme);
+      await read(join(checkout, "snshah.omp.json")) ?? await read(theme);
     if (source === undefined) throw new Error("Run setup from the workstation checkout to install the Oh My Posh theme.");
     if (!available("oh-my-posh")) steps.push({ kind: "command", id: "install-oh-my-posh", argv: ["omarchy", "pkg", "aur", "add", "oh-my-posh-bin"] });
     await file(theme, source);
@@ -554,10 +543,8 @@ async function plan(features: Features): Promise<Step[]> {
     const previous = await read(theme);
     if (previous !== undefined) steps.push({ kind: "remove", path: theme, previous });
   }
-  for (const entry of shellFiles) {
-    if (entry.shell === "bash" || entry.hadLegacy)
-      await file(entry.path, upsertBlock(entry.userContent, beginShell, endShell, shellBlock(entry.shell)));
-  }
+  const bashrc = join(home, ".bashrc");
+  await file(bashrc, upsertBlock(await read(bashrc) ?? "", beginShell, endShell, shellBlock("bash")));
   const hypr = join(config, "hypr");
   if (!await exists(join(hypr, "hyprland.lua"))) throw new Error("This workstation profile requires Omarchy Quattro with Hyprland Lua.");
   const bindings = join(hypr, "bindings.lua");
@@ -569,11 +556,7 @@ async function plan(features: Features): Promise<Step[]> {
     "-- <<< snshah workstation <<<",
   ];
   await file(bindings, upsertBlock(await read(bindings) ?? "", bindingBlock[0], bindingBlock[2], bindingBlock.join("\n")));
-  const oldBinding = join(hypr, "snshah.lua");
-  const previousBinding = await read(oldBinding);
-  if (previousBinding === 'o.bind("SUPER + ALT + M", "Ergonex Workstation", "omarchy-launch-terminal snshah open menu")\n')
-    steps.push({ kind: "remove", path: oldBinding, previous: previousBinding });
-  if (!available("microsoft-edge-stable"))
+  if ((current.work.length || features.defaultEdge || current.browser.kind === "edge-default") && !available("microsoft-edge-stable"))
     steps.push({ kind: "command", id: "install-edge", argv: ["omarchy", "install", "browser", "edge"] });
   if ((features.defaultEdge || current.browser.kind === "edge-default") && capture(["xdg-settings", "get", "default-web-browser"], { ...process.env, XDG_CURRENT_DESKTOP: "" }) !== "microsoft-edge.desktop")
     steps.push({ kind: "command", id: "default-browser", argv: ["omarchy", "default", "browser", "edge"] });
@@ -582,19 +565,28 @@ async function plan(features: Features): Promise<Step[]> {
   }
   const apps = join(data, "applications");
   if (data !== join(home, ".local/share")) throw new Error("Omarchy web app installation requires the default XDG_DATA_HOME.");
-  for (const app of appEntries) {
+  for (const app of appEntries(current.work)) {
     const command = `snshah ${app.args}`;
     const desktop = await read(join(apps, `${app.name}.desktop`));
     if (!desktop?.split("\n").includes(`Exec=${command}`))
       steps.push({ kind: "command", id: app.args, argv: ["omarchy", "webapp", "install", app.name, app.url, app.icon, command, ""] });
-    const oldDesktop = join(apps, app.name.replace(product, "Ergonex") + ".desktop");
-    const previous = await read(oldDesktop);
-    const oldName = app.name.replace(product, "Ergonex");
-    if (previous?.includes(`\nName=${oldName}\n`) && previous.includes(`\nExec=${command}\n`))
-      steps.push({ kind: "remove", path: oldDesktop, previous });
+  }
+  if (await exists(apps)) {
+    const active = new Set(current.work.map(tenant => tenant.id));
+    const prefix = product + " ";
+    for (const entry of (await readdir(apps, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+      if (!entry.isFile() || !entry.name.startsWith(prefix)) continue;
+      const match = /^(Outlook|OneDrive) \(([a-z][a-z0-9-]{0,47})\)\.desktop$/.exec(entry.name.slice(prefix.length));
+      if (!match || active.has(match[2])) continue;
+      const path = join(apps, entry.name);
+      const previous = await read(path);
+      if (previous?.includes(`\nName=${entry.name.slice(0, -8)}\n`) &&
+        previous.includes(`\nExec=snshah open ${match[2]} ${match[1].toLowerCase()}\n`))
+        steps.push({ kind: "remove", path, previous });
+    }
   }
 
-  if (features.sync || tenants.some(id => current.work[id].files.kind === "rclone")) {
+  if (features.sync || current.work.some(tenant => tenant.files.kind === "rclone")) {
     if (!available("rclone")) steps.push({ kind: "command", id: "install-rclone", argv: ["omarchy", "pkg", "add", "rclone", "fuse3"] });
     else if (!available("fusermount3")) steps.push({ kind: "command", id: "install-fuse3", argv: ["omarchy", "pkg", "add", "fuse3"] });
   }
@@ -614,7 +606,7 @@ async function plan(features: Features): Promise<Step[]> {
         models: { [model]: { name: model } } } },
     }, null, 2) + "\n");
   }
-  await file(menuPath, await menuContent());
+  await file(menuPath, await menuContent(current.work));
   return steps;
 }
 
@@ -691,9 +683,9 @@ async function doctor(json: boolean): Promise<void> {
   print(json ? result : Object.entries(result).map(([key, value]) => `${key}: ${value ?? "unavailable"}`), json);
 }
 
-async function browser(url: string, tenant: Tenant, app: boolean): Promise<void> {
-  const previous = join(home, ".local/share/edge-work-profile");
-  const directory = tenant === "work1" && await exists(previous) ? previous : join(data, "snshah/edge", tenant);
+async function browser(url: string, id: string, app: boolean): Promise<void> {
+  const tenant = tenantById(await settings(), id);
+  const directory = join(data, "snshah/edge", tenant.id);
   launch(["microsoft-edge-stable", `--user-data-dir=${directory}`, app ? `--app=${url}` : url]);
 }
 
@@ -712,9 +704,9 @@ async function openApp(app: PersonalApp): Promise<void> {
         ["ChatGPT Dot", { kind: "open", app: "dot" }],
         ["Herdr", { kind: "open", app: "herdr" }],
       ]);
-      for (const [i, tenant] of tenants.entries()) {
+      for (const { id, label: tenantLabel } of current.work) {
         for (const [label, app] of [["Outlook", "outlook"], ["Calendar", "calendar"], ["Teams", "teams"], ["OneDrive", "onedrive"]] as const)
-          actions.set(`${i + 1} · ${current.work[tenant].label} · ${label}`, { kind: "work", tenant, app });
+          actions.set(`${tenantLabel} · ${label}`, { kind: "work", tenant: id, app });
       }
       const argv = available("omarchy-menu-select")
         ? ["omarchy-menu-select", "Workstation accounts", ...actions.keys()]
@@ -736,8 +728,7 @@ async function runAgent(agent: Agent, directory: string): Promise<void> {
     await run([agent], { cwd: directory, env: await secretEnvironment(agent) });
     return;
   }
-  const generated = join(profileDir, "opencode.auto.json");
-  const localConfig = await exists(generated) ? generated : join(profileDir, "opencode.json");
+  const localConfig = join(profileDir, "opencode.auto.json");
   if (!await exists(localConfig)) throw new Error("Set up the local agent with snshah apply --local-ai.");
   const child = Bun.spawn(["opencode"], {
     cwd: directory, env: { ...await secretEnvironment(agent), OPENCODE_CONFIG: localConfig },
@@ -746,8 +737,9 @@ async function runAgent(agent: Agent, directory: string): Promise<void> {
   process.exitCode = await child.exited;
 }
 
-async function drive(action: "list" | "mount", tenant: Tenant): Promise<void> {
-  const files = (await settings()).work[tenant].files;
+async function drive(action: "list" | "mount", id: string): Promise<void> {
+  const tenant = tenantById(await settings(), id);
+  const { files } = tenant;
   if (files.kind !== "rclone") throw new Error("Set this profile's files.kind to rclone in the workstation config.");
   const remote = `${files.remote}:`;
   const env = await secretEnvironment("drive");
@@ -755,7 +747,7 @@ async function drive(action: "list" | "mount", tenant: Tenant): Promise<void> {
     await run(["rclone", "lsf", remote], { env });
     return;
   }
-  const mount = join(home, "OneDrive", tenant);
+  const mount = join(home, "OneDrive", tenant.id);
   await mkdir(mount, { recursive: true, mode: 0o700 });
   await run(["rclone", "mount", remote, mount, "--read-only"], { env });
 }
@@ -835,15 +827,15 @@ async function restore(command: Extract<Command, { kind: "restore" | "verify" }>
 type MenuArgs =
   | [kind: "help" | "plan" | "apply" | "doctor" | "workspace" | "context" | "shell" | "menu"]
   | ["plan" | "apply" | "doctor", "--json"] | ["test", ...[] | ["--published"]]
-  | ["open", PersonalApp] | ["open", Tenant, WorkApp]
-  | ["agent", Agent] | ["drive", "list" | "mount", Tenant]
+  | ["open", PersonalApp] | ["open", string, WorkApp]
+  | ["agent", Agent] | ["drive", "list" | "mount", string]
   | ["config", "edit" | "check" | "setup" | "set-secret"]
   | ["vault", "status" | "backup" | "verify" | "restore"]
   | ["plugin", "install" | "remove" | "toggle"];
 type MenuAction = { id: string; label: string; args: MenuArgs; terminal?: true };
 type MenuSection = { id: string; label: string; actions: MenuAction[] };
 
-function menuSections(): MenuSection[] {
+function menuSections(work: readonly Tenant[]): MenuSection[] {
   return [
     { id: "open", label: "Open", actions: [
       { id: "gmail", label: "Personal mail", args: ["open", "gmail"] },
@@ -851,7 +843,7 @@ function menuSections(): MenuSection[] {
       { id: "herdr", label: "Herdr", args: ["open", "herdr"] },
       { id: "chooser", label: "Accounts by name", args: ["open", "menu"] },
     ] },
-    ...tenants.map((id): MenuSection => ({ id, label: `Tenant ${id.at(-1)}`, actions: [
+    ...work.map(({ id }, index): MenuSection => ({ id: `tenant-${id}`, label: `Tenant ${index + 1}`, actions: [
       ...workApps.map((app): MenuAction => ({
         id: app, label: { browser: "Edge browser", outlook: "Outlook", calendar: "Calendar", teams: "Teams", onedrive: "OneDrive on the web" }[app],
         args: ["open", id, app],
@@ -898,14 +890,14 @@ function menuSections(): MenuSection[] {
 }
 const menuStart = "  // >>> snshah menu >>>";
 const menuEnd = "  // <<< snshah menu <<<";
-async function menuContent(): Promise<string> {
+async function menuContent(work: readonly Tenant[]): Promise<string> {
   const source = await read(menuPath) ?? "{\n}\n";
   const open = source.indexOf("{");
   if (open < 0 || !source.trimEnd().endsWith("}")) throw new Error("Expected an Omarchy menu JSONC object.");
   const rows: Record<string, { label: string; icon?: string; action?: string }> = {
     [menuId]: { label: product, icon: "󰆍" },
   };
-  for (const section of menuSections()) {
+  for (const section of menuSections(work)) {
     rows[`${menuId}.${section.id}`] = { label: section.label };
     for (const action of section.actions) {
       const id = `${section.id}.${action.id}`;
@@ -920,7 +912,7 @@ async function menuContent(): Promise<string> {
 
 async function menu(command: Extract<Command, { kind: "menu" }>): Promise<void> {
   if (!command.id) { await run(["omarchy", "menu", "summon", menuId]); return; }
-  const action = menuSections().flatMap(section => section.actions.map(item => ({ ...item, id: `${section.id}.${item.id}` })))
+  const action = menuSections((await settings()).work).flatMap(section => section.actions.map(item => ({ ...item, id: `${section.id}.${item.id}` })))
     .find(item => item.id === command.id);
   if (!action) throw new Error("Unknown workstation menu action.");
   if (action.terminal && !command.terminal) {
@@ -964,33 +956,27 @@ async function configure(action: "edit" | "check" | "setup"): Promise<void> {
   if (action === "check") { console.log("Workstation config is valid."); return; }
   const personal = await promptInput("Personal profile display name");
   if (personal) current.personal = personal;
-  for (const id of tenants) {
-    const label = await promptInput(`Display name for ${id} (blank keeps its name)`);
-    if (label) current.work[id].label = label;
+  for (const tenant of current.work) {
+    const label = await promptInput(`Display name for ${tenant.id} (blank keeps its name)`);
+    if (label) tenant.label = label;
   }
   validateConfig(current);
   if (!await confirm("Replace the config with these settings? Comments and custom expressions will be regenerated.")) return;
   if (await privateConfigBytes() !== previous) throw new Error("Config changed during setup.");
   await atomicFile(conf, configSource(current), 0o600);
-  await atomicFile(menuPath, await menuContent());
+  await atomicFile(menuPath, await menuContent((await settings()).work));
   await notify("Profile names updated. Back up the workstation config.", true).catch(() => {});
 }
 
 async function plugin(action: "install" | "remove" | "toggle"): Promise<void> {
   if (config !== join(home, ".config")) throw new Error("Omarchy plugin management requires the default XDG_CONFIG_HOME.");
-  const oldId = "shah.ergonex";
-  const oldFolder = join(config, "omarchy/plugins", oldId);
   switch (action) {
     case "install":
       for (const [name, content] of Object.entries(pluginFiles)) await atomicFile(join(pluginDir, name), content);
       await run(["omarchy", "plugin", "validate", pluginDir]);
-      await atomicFile(menuPath, await menuContent());
+      await atomicFile(menuPath, await menuContent((await settings()).work));
       await run(["omarchy-shell", "shell", "rescanPlugins"]);
       await run(["omarchy", "plugin", "enable", pluginId]);
-      if (await read(join(oldFolder, "manifest.json")) === pluginFiles["manifest.json"]
-          .replaceAll(pluginId, oldId).replaceAll(product, "Ergonex").replaceAll("Panel.auto.qml", "Panel.qml") &&
-          await read(join(oldFolder, "Panel.qml")) === pluginFiles["Panel.auto.qml"].replaceAll(pluginId, oldId))
-        await run(["omarchy", "plugin", "remove", oldId, "--yes"]);
       return;
     case "remove":
       if (await exists(pluginDir)) await run(["omarchy", "plugin", "remove", pluginId, "--yes"]);
@@ -1056,28 +1042,22 @@ async function selfTest(published: boolean): Promise<void> {
   try {
     const tools = join(fixture, "tools.auto.bin");
     const hypr = join(fixture, ".config/hypr");
-    const legacy = join(fixture, ".local/share/edge-work-profile");
     const desktop = join(fixture, ".local/share/applications");
     const root = join(fixture, "Team Work");
     const source = await exists(join(import.meta.dir, "bootstrap.sh")) ? import.meta.dir : checkoutPath(await workspaceRoot());
     await mkdir(tools);
     await mkdir(hypr, { recursive: true });
     await mkdir(join(fixture, ".config/opencode"));
-    await mkdir(legacy, { recursive: true });
     await mkdir(desktop, { recursive: true });
     await symlink(process.execPath, join(tools, "bun"));
-    const legacyInit = 'export PATH="$HOME/.local/bin:$PATH"; eval "$(oh-my-posh init bash --config ~/.config/oh-my-posh/ergonex.omp.json)"';
     const bashrc = 'alias gs="git status"\nexport USER_SETTING=kept\n';
     const agentConfig = '{"userSetting":true}\n';
     const bindings = "-- User bindings\n";
-    await writeFile(join(fixture, ".bashrc"), bashrc + legacyInit + "\n");
+    await writeFile(join(fixture, ".bashrc"), bashrc);
     await writeFile(join(fixture, "AGENTS.md"), "# Existing instructions\n");
     await writeFile(join(fixture, ".config/opencode/opencode.json"), agentConfig);
     await writeFile(join(hypr, "hyprland.lua"), "");
     await writeFile(join(hypr, "bindings.lua"), bindings);
-    await writeFile(join(hypr, "snshah.lua"), 'o.bind("SUPER + ALT + M", "Ergonex Workstation", "omarchy-launch-terminal snshah open menu")\n');
-    const oldDesktop = join(desktop, "Ergonex Gmail.desktop");
-    await writeFile(oldDesktop, "[Desktop Entry]\nName=Ergonex Gmail\nExec=snshah open gmail\n");
     await writeFile(join(tools, "omarchy"), `#!/usr/bin/env bun
 import { mkdirSync, writeFileSync } from "node:fs";
 const [, , group, action, name, , , exec] = Bun.argv;
@@ -1129,34 +1109,72 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     assert.equal(invoke(...bootstrap), "No changes needed.\n");
     const rc = await readFile(join(fixture, ".bashrc"), "utf8");
-    assert(rc.startsWith(bashrc) && !rc.includes(legacyInit));
+    assert(rc.startsWith(bashrc));
     assert.equal(rc.match(/>>> snshah shell >>>/g)?.length, 1);
     assert.equal(await readFile(join(fixture, "AGENTS.md"), "utf8"), "# Existing instructions\n");
     assert.equal(await readFile(join(fixture, ".config/opencode/opencode.json"), "utf8"), agentConfig);
     assert((await readFile(join(hypr, "bindings.lua"), "utf8")).startsWith(bindings));
     assert(await exists(join(hypr, "snshah.auto.lua")));
-    assert(!await exists(join(hypr, "snshah.lua")));
-    assert(!await exists(oldDesktop));
     assert(await exists(join(desktop, "Shahid Shah Workstation Gmail.desktop")));
-    assert.match(invoke("snshah", "shell"), /snshah\.auto\.omp\.json/);
     assert.match(invoke("bash", "--noprofile", "-ic", "alias ll; alias gs; type mkcd"), /alias ll='ls -al'\nalias gs='git status'/);
     assert.equal(invoke("bash", "--noprofile", "-c", 'source "$HOME/.bashrc"; alias ll 2>/dev/null || true'), "");
-    for (const tenant of tenants) invoke("snshah", "open", tenant, "outlook");
+    const fixtureConf = join(fixture, ".config/snshah.conf.ts");
+    const freshConfig = await readFile(fixtureConf, "utf8");
+    const settings = await interpretConfig(freshConfig);
+    const menuFile = join(fixture, ".config/omarchy/extensions/omarchy-menu.jsonc");
+    assert.deepEqual(settings.work, []);
+    assert(!(await readFile(menuFile, "utf8")).includes("Tenant 1"));
+    const work: Tenant[] = ["studio", "research", "consulting", "operations"].map(id => ({
+      id, label: `Fixture ${id}`, files: { kind: "web" },
+    }));
+    async function configureTenants(tenants: readonly Tenant[]) {
+      await writeFile(fixtureConf, configSource({ ...settings, work: tenants }));
+    }
+    await configureTenants(work.slice(0, 1));
+    invoke("snshah", "apply");
+    assert((await readFile(menuFile, "utf8")).includes("Tenant 1"));
+    assert(!(await readFile(menuFile, "utf8")).includes("Tenant 2"));
+    for (const id of ["missing", "../studio", "personal"]) {
+      assert.equal(Bun.spawnSync(["snshah", "open", id, "outlook"], { env }).exitCode, 2);
+      assert.equal(Bun.spawnSync(["snshah", "drive", "list", id], { env }).exitCode, 2);
+    }
+    await configureTenants([work[0], { ...work[1], id: work[0].id }]);
+    assert.match(Bun.spawnSync(["snshah", "plan"], { env }).stderr.toString(), /Duplicate tenant ID/);
+    await configureTenants(work);
+    invoke("snshah", "apply");
+    assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
+    const fourMenus = await readFile(menuFile, "utf8");
+    assert(fourMenus.includes("Tenant 4") && !fourMenus.includes(work[0].label));
+    for (const tenant of work) invoke("snshah", "open", tenant.id, "outlook");
     const log = join(fixture, "browser.auto.log");
     const deadline = Date.now() + 1500;
     let launches = "";
     while (Date.now() < deadline) {
       launches = await read(log) ?? "";
-      if ((launches.match(/--app=https:\/\/outlook\.office\.com\/mail\//g)?.length ?? 0) === 3) break;
+      if ((launches.match(/--app=https:\/\/outlook\.office\.com\/mail\//g)?.length ?? 0) === work.length) break;
       await Bun.sleep(30);
     }
-    for (const directory of [legacy, ...tenants.slice(1).map(tenant => join(fixture, ".local/share/snshah/edge", tenant))])
-      assert(launches.includes(`--user-data-dir=${directory}`));
+    for (const { id } of work)
+      assert(launches.includes(`--user-data-dir=${join(fixture, ".local/share/snshah/edge", id)}`));
+    const studioProfile = join(fixture, ".local/share/snshah/edge", work[0].id);
+    await mkdir(studioProfile, { recursive: true });
+    const studioLauncher = join(desktop, `${product} Outlook (${work[0].id}).desktop`);
+    await configureTenants([work[1], { ...work[0], label: "Renamed studio" }, ...work.slice(2)]);
+    assert(!invoke("snshah", "plan", "--json").includes(studioLauncher));
+    invoke("snshah", "apply");
+    const reordered = await readFile(menuFile, "utf8");
+    assert(reordered.indexOf(".tenant-research") < reordered.indexOf(".tenant-studio"));
+    assert(!reordered.includes("Renamed studio"));
+    await configureTenants(work.slice(1));
+    invoke("snshah", "apply");
+    assert(!await exists(studioLauncher));
+    assert(await exists(studioProfile));
+    assert(!(await readFile(menuFile, "utf8")).includes(".tenant-studio"));
+    assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     invoke("snshah", "plugin", "install");
     const generatedPlugin = join(fixture, ".config/omarchy/plugins/shah.workstation");
     assert(await exists(join(generatedPlugin, "manifest.json")));
     assert(await exists(join(generatedPlugin, "Panel.auto.qml")));
-    const fixtureConf = join(fixture, ".config/snshah.conf.ts");
     assert.equal((await stat(fixtureConf)).mode & 0o777, 0o600);
     const baseline = await readFile(fixtureConf, "utf8");
     const fake = "fixture-only-token";
@@ -1176,7 +1194,7 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const exportCheck = Bun.spawnSync(["bash", "-xc", 'eval "$(snshah shell)"; check-shell.auto'], { env });
     assert(exportCheck.success);
     assert(!exportCheck.stderr.toString().includes(fake));
-    for (const section of menuSections()) {
+    for (const section of menuSections(work)) {
       assert.equal(new Set(section.actions.map(action => action.id)).size, section.actions.length);
       for (const action of section.actions) parse(action.args.join(" ") === "config set-secret"
         ? [...action.args, "SNSH_TEST_COMMAND"] : action.args);

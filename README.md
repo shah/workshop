@@ -1,8 +1,8 @@
 # Shahid Shah Workstation
 
-A keyboard-first Omarchy Quattro profile for personal mail, three isolated Microsoft 365 tenants, OneDrive, ChatGPT Dot, and engineering agents. Run the same actions from the native Omarchy menu or the `snshah` CLI.
+A keyboard-first Omarchy Quattro profile for personal mail, any number of isolated Microsoft 365 tenants, OneDrive, ChatGPT Dot, and engineering agents. Run the same actions from the native Omarchy menu or the `snshah` CLI.
 
-![The Shahid Shah Workstation submenu in Omarchy](docs/menu.png)
+![The workstation submenu with three example tenants configured](docs/menu.png)
 
 ## Install
 
@@ -31,12 +31,12 @@ For an existing checkout, fetch and review the update before fast-forwarding. Th
 - **Super + Alt + M** or `snshah menu` opens it directly. Check `omarchy menu keybindings --print` if you already use the shortcut.
 - `snshah plugin install` adds an optional Quickshell bar icon for the same menu. `snshah plugin toggle` opens the menu and `snshah plugin remove` removes the bar icon. The native root menu entry stays available. The plugin is bundled here and installed locally.
 
-Use the arrow keys and Enter, or type to filter. **Open → Accounts by name** reads private display names at runtime. **Tenant 1–3** provide direct routes using stable slot numbers. The generated Omarchy menu file contains generic titles. Agent sessions, mounts, vault passphrases, and secret entry open in an Omarchy terminal. **Setup & Diagnostics → Apply changes** previews the changes and asks for confirmation.
+Use the arrow keys and Enter, or type to filter. **Open → Accounts by name** reads private display names at runtime. Each configured tenant gets a submenu, numbered in config order. **Accounts by name** displays the labels from your private config. The generated Omarchy menu file uses generic titles. Agent sessions, mounts, vault passphrases, and secret entry open in an Omarchy terminal. **Setup & Diagnostics → Apply changes** previews the changes and asks for confirmation.
 
 | Menu | CLI |
 | --- | --- |
 | Open | `snshah open gmail\|dot\|herdr\|menu` |
-| Tenant 1–3 | `snshah open work1 outlook`, `snshah drive list work2`, `snshah drive mount work3` |
+| Tenant submenus | `snshah open studio outlook`, `snshah drive list research`, `snshah drive mount research` |
 | Agents | `snshah agent claude\|codex\|local [directory]` |
 | Configuration | `snshah config setup\|check\|edit`, `snshah config set-secret VARIABLE`, `snshah shell` |
 | Setup & Diagnostics | `snshah plan`, `snshah apply`, `snshah doctor --json`, `snshah workspace`, `snshah context`, `snshah test` |
@@ -51,7 +51,7 @@ The native menu is generated from the command table embedded in `snshah.ts`. Oma
 
 The only workstation settings file is **`~/.config/snshah.conf.ts`**. Setup creates it with mode **0600**. You must own the file, and it must be a regular file. It contains executable TypeScript, so review it before loading a copy from another machine. The generated `snshah.auto.d.ts` exposes the config types to VS Code.
 
-1. Open **Configuration → Name my profiles** or run `snshah config setup`. Enter your own names locally. The public repo and screenshots use generic titles.
+1. Open **Configuration → Edit in VS Code** and add tenants to the `work` array. A fresh install starts with an empty array. Use **Name my profiles** to rename entries you’ve already added. The screenshots use example tenants.
 2. Open **Configuration → Edit in VS Code** or run `snshah config edit`. The editor command watches for saves and checks the config. After a valid change, select **Back Up Now** in the notification or **Vault → Back up now** in the menu.
 3. Run `snshah config check`, followed by `snshah plan` and `snshah apply` when a setting requires package or desktop changes.
 
@@ -59,14 +59,24 @@ Configuration options include:
 
 | Setting | Values |
 | --- | --- |
-| `personal`, `work.work1.label`, `work.work2.label`, `work.work3.label` | Editable display names. Stable slot IDs retain browser sessions and mounts. |
+| `personal`, `work[].label` | Editable display names. |
+| `work[].id` | Stable, unique tenant ID. Use lowercase letters, digits, and hyphens, starting with a letter. |
 | `workspacesRoot` | Absolute path for managed checkouts |
 | `browser` | `{ kind: "omarchy" }` or `{ kind: "edge-default" }` |
 | `prompt` | `{ kind: "starship" }` or `{ kind: "posh" }` using the bundled theme |
 | `localAI` | `{ kind: "off" }` or `{ kind: "ollama", model: "qwen3-coder:30b" }` |
-| `work.workN.files` | `{ kind: "web" }` or `{ kind: "rclone", remote: "example-remote" }` |
+| `work[].files` | `{ kind: "web" }` or `{ kind: "rclone", remote: "example-remote" }` |
 
-On upgrade, setup imports the old labels, model, and workspace root when it creates the TypeScript file. It uses the TypeScript file on subsequent runs.
+In the generated TypeScript file, replace the empty `work` array in `preferences` with entries like these:
+
+```ts
+work: [
+  { id: "studio", label: "Example Studio", files: { kind: "web" } },
+  { id: "research", label: "Example Research", files: { kind: "rclone", remote: "research-files" } },
+],
+```
+
+Use the tenant ID in CLI commands. Renaming or reordering an entry leaves its browser directory and mount path intact. After adding or removing entries, run `snshah apply` to update launchers and menu routes. Removing an entry leaves its browser data on disk.
 
 ### Shell aliases and API tokens
 
@@ -93,15 +103,15 @@ Config checks, diagnostics, the menu, and notifications omit token values. Keep 
 Personal Gmail and ChatGPT Dot use your Omarchy default browser. Work slots use separate Edge data directories. Open each full browser once and sign into the matching tenant:
 
 ```bash
-snshah open work1 browser
-snshah open work2 outlook
-snshah open work3 calendar
-snshah open work3 onedrive
+snshah open studio browser
+snshah open studio outlook
+snshah open research calendar
+snshah open research onedrive
 ```
 
-Work 1 reuses the original work profile if it exists. Outlook opens the web app in its own window. In Edge, use **Apps → Install this site as an app** if you want an installed PWA. Tenant policy can affect sign-in, device compliance, and app features. [Microsoft Outlook web app guide](https://support.microsoft.com/en-us/outlook/use-the-web-version-of-outlook-like-a-desktop-app)
+Outlook opens the web app in its own window. In Edge, use **Apps → Install this site as an app** if you want an installed PWA. Tenant policy can affect sign-in, device compliance, and app features. [Microsoft Outlook web app guide](https://support.microsoft.com/en-us/outlook/use-the-web-version-of-outlook-like-a-desktop-app)
 
-For a local OneDrive mount, set the tenant’s `files` to `rclone`, run `snshah apply`, then create the named remote with `rclone config`. Verify it with `snshah drive list work2` before running `snshah drive mount work2`. The mount appears at `~/OneDrive/work2`, is read-only, and stops when you press Ctrl+C in its terminal. Use the web app for edits or uploads. [rclone OneDrive setup](https://rclone.org/onedrive/)
+For a local OneDrive mount, set the tenant’s `files` to `rclone`, run `snshah apply`, then create the named remote with `rclone config`. Verify it with `snshah drive list research` before running `snshah drive mount research`. The mount appears at `~/OneDrive/research`, is read-only, and stops when you press Ctrl+C in its terminal. Use the web app for edits or uploads. [rclone OneDrive setup](https://rclone.org/onedrive/)
 
 ## Dot, Herdr, and engineering agents
 
