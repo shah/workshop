@@ -1,164 +1,136 @@
 # Ergonex
 
-**Shahid's AI-Native Workstation Nexus for Omarchy**
+An opinionated Omarchy Quattro workstation for someone coming from Windows and Outlook Desktop. **`snshah`** is the command that sets it up, opens your mail and files, and starts the coding agent you choose.
 
-Ergonex turns a clean [Omarchy](https://omarchy.org/) installation into a local-first, multi-agent engineering and publishing workstation orchestrated through [Herdr](https://herdr.dev/), [Ollama](https://ollama.com/), [OpenCode](https://opencode.ai/), and [Oh My Posh](https://ohmyposh.dev/)—with a clean separation between **public reproducible infrastructure** (in this GitHub repository) and **private encrypted machine secrets** (stored in Microsoft OneDrive Personal Vault).
+Ergonex gives you a keyboard-driven launcher for Gmail, three separate Microsoft 365 work tenants, ChatGPT Dot, and Herdr. Omarchy handles package installation, browser defaults, web app launchers, and desktop integration. Your local profile gives the work tenants names you recognize.
 
----
+## Install
 
-## One-Line Bootstrap
+Use an Omarchy Quattro desktop with Lua-based Hyprland config. Run as your regular user. Package installation and system service setup can ask for sudo.
 
-Run this on a fresh or factory-reset Omarchy installation (`Super + Alt + Space` → **Setup > Reset Computer**):
+To preview changes, clone into the canonical workspace path and run:
+
+```bash
+mkdir -p ~/workspaces/github.com/shah
+git clone https://github.com/shah/ergonex.git ~/workspaces/github.com/shah/ergonex
+cd ~/workspaces/github.com/shah/ergonex
+# If Bun is missing, install it with Omarchy before previewing.
+omarchy pkg add bun || omarchy pkg aur add bun-bin
+bun ./snshah.ts plan
+bun ./snshah.ts apply
+```
+
+If the checkout already exists, run `git fetch --all --prune` in it and review its status before updating it.
+
+For a fresh machine, the bootstrap installs Bun if needed and applies the profile from a single Git revision:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shah/ergonex/main/bootstrap.sh | bash
 ```
 
-### Bootstrap acceptance test
+Run `snshah plan` to see outstanding changes. If setup stops partway through, fix the reported error and rerun `snshah apply`. The first apply sets Edge as the default browser and adds a workstation hotkey. The optional Ollama and OneDrive tools are enabled by `snshah apply --local-ai` and `snshah apply --sync`, respectively. You can combine both flags.
 
-On a fresh Omarchy test machine, run the command above as your normal desktop user. Confirm it exits successfully and prints **Ergonex Bootstrap Complete!**. Run the same command again and confirm it completes without adding duplicate prompt initialization lines, Hyprland bindings, or desktop launchers. The second run should reuse the installed Oh My Posh binary and downloaded Ollama model.
+## Mail, calendar, meetings, and files
 
-You can also run `bash bootstrap.sh` from a local checkout to test the file-based entry point.
+Press **Super + Alt + M** for the Ergonex chooser, or use **Super + Space** and search for an Ergonex launcher. The chooser includes:
 
----
+| Account | Available actions |
+| --- | --- |
+| Personal | Gmail in your regular Edge profile |
+| Work 1 | Outlook, Calendar, Teams, and OneDrive in the Work 1 profile |
+| Work 2 | Outlook, Calendar, Teams, and OneDrive in the Work 2 profile |
+| Work 3 | Outlook, Calendar, Teams, and OneDrive in the Work 3 profile |
 
-## What `bootstrap.sh` Configures
+Rename the work slots locally in `~/.config/snshah/profile.json`. The fixed IDs `work1`, `work2`, and `work3` keep browser and storage routing stable when you rename a slot. For example:
 
-1. **Omarchy Verification:** Confirms `$OMARCHY_PATH` / `omarchy` is present before touching system files.
-2. **Oh My Posh Binary & Context-Aware Prompt (`ergonex.omp.json`):**
-   - Installs the latest `oh-my-posh` binary into `~/.local/bin/oh-my-posh`.
-   - Displays a dynamic context badge on the far left of your prompt:
-     - `HUMAN` (slate) — Direct interactive shell session
-     - `HERDR` (blue) — Running inside a Herdr workspace pane
-     - `AGENT` (red) — Executed inside an AI CLI harness (`opencode`, `claude`, `codex`)
-3. **Hardware-Aware Local LLM (Ollama):**
-   - Inspects GPU VRAM and system RAM and pulls the strongest local coding model (`qwen3-coder:30b`, `qwen3.8:27b`, `gpt-oss:20b`, or `qwen2.5-coder:7b`).
-4. **Omarchy-Native AI Harnesses:**
-   - Configures **OpenCode** (`c` / `opencode`) to run locally against Ollama (`http://127.0.0.1:11434/v1`) in `plan` mode by default.
-   - Pre-installs **Claude Code** (`cx` / `claude`) and **OpenAI Codex** (`cy` / `codex`) using Omarchy's native `mise` lazy-installation wrappers.
-5. **Herdr & Herdr Desktop (`herdr-workspace.sh`):**
-   - Installs `herdr-app` and `herdr-core`, registers agent lifecycle hooks, configures headless terminal dimensions (`160x50`), and provides `herdr-workspace.sh` (`Super + Shift + H`).
-6. **Master `$HOME/AGENTS.md` Blueprint:**
-   - Enforces the `~/workspaces/<host>/<namespace>/<repo>` directory convention across all agents.
-   - Documents Omarchy-native update/recovery rules and a 5-phase Machine Preparation Checklist.
-7. **Browsers, Apps & Hyprland Keybindings:**
-   - Installs **Microsoft Edge** as the default browser, provisions an isolated **Edge Work Profile**, installs native desktop apps + Omarchy web apps, and writes shortcuts to the active Hyprland bindings file.
+```json
+{
+  "labels": { "work1": "Company A", "work2": "Company B", "work3": "Company C" },
+  "model": "qwen3-coder:30b"
+}
+```
 
----
+Open the full browser for each slot once and sign in to the corresponding tenant. Then use its app windows for day-to-day work:
 
-## Public Repo vs. OneDrive Personal Vault (`vault-sync.sh`)
-
-Ergonex splits your workstation state into two tiers:
-
-| Tier | Where It Lives | What Goes Here |
-| :--- | :--- | :--- |
-| **Public & Reproducible** | `~/workspaces/github.com/shah/ergonex` (GitHub) | `bootstrap.sh`, `vault-sync.sh`, `herdr-workspace.sh`, `ergonex.omp.json`, `README.md` |
-| **Private & Irreplaceable** | **OneDrive Personal Vault** (via `vault-sync.sh`) | `~/.ssh`, `~/.gnupg`, `~/.age`, `~/.config/gh`, `~/.config/onedrive`, `~/.config/ente`, `~/.gitconfig.local`, custom monitor/input overrides |
-
-### Why `vault-sync.sh` Uses Local `age` Encryption + `Vault-Staging`
-Microsoft's OneDrive API prevents background Linux daemons from unlocking **Personal Vault** automatically because Personal Vault requires interactive 2FA verification (Microsoft Authenticator) and auto-locks after inactivity.
-
-`vault-sync.sh` solves this securely:
-1. It reads `~/.config/ergonex/vault-manifest.txt` and bundles your private files into a passphrase-encrypted `.tar.gz.age` archive inside `~/OneDrive/Vault-Staging/`.
-2. Your local `onedrive` daemon syncs that encrypted blob to OneDrive automatically.
-3. You unlock **Personal Vault** in OneDrive Web (`Super + Alt + D`) with Microsoft Authenticator and move the encrypted archive into **Personal Vault** for two-factor hardware/biometric protection on top of your `age` passphrase.
-
-### Daily Usage (`vault-sync.sh`)
 ```bash
-# Check which private configs exist locally and list staged encrypted snapshots
-vault-sync.sh status
-
-# Create a new passphrase-encrypted backup and push to ~/OneDrive/Vault-Staging
-vault-sync.sh backup
-
-# Restore private configs on a freshly reset Omarchy PC (hardens ~/.ssh and ~/.gnupg permissions)
-vault-sync.sh restore
+snshah open work1 browser
+snshah open work2 outlook
+snshah open work3 calendar
+snshah open work3 onedrive
 ```
-*(Edit `~/.config/ergonex/vault-manifest.txt` at any time to add or remove private files/folders.)*
 
----
+The three work profiles have separate Edge data directories and sign-ins. If you used the original Ergonex work profile, Work 1 reuses that directory. Check which account is active before sending mail or moving files. Outlook is the web app in its own window. For Edge's installed PWA experience, use **Apps → Install this site as an app** from within the corresponding profile. Tenant sign-in, device-compliance requirements, and feature availability are controlled by Microsoft and your organization. [Microsoft Outlook web app guide](https://support.microsoft.com/en-us/outlook/use-the-web-version-of-outlook-like-a-desktop-app)
 
-## Setting Up Microsoft Apps & Isolated Work Profile
+### OneDrive in the file manager
 
-### 1. Personal Microsoft Edge & Password Sync
-1. Press `Super + Shift + B` to launch **Microsoft Edge (Personal)**.
-2. Sign in with your **personal Microsoft Account** and enable **Sync** (Passwords, Favorites, Extensions, Settings).
-3. All personal web apps (**Gmail**, **Outlook Personal**, **Cloudflare**, **UniFi**, **WhatsApp**, **ChatGPT**) inherit this profile automatically.
+The OneDrive web launchers work after tenant sign-in. For local file browsing, install the optional rclone and FUSE packages and set up three distinct OneDrive remotes:
 
-### 2. Isolated Microsoft Edge Work Profile (M365 / Entra ID)
-1. Press `Super + Alt + B` (or launch **Microsoft Edge (Work)** from `Super + Space`).
-2. Because it uses `--user-data-dir=~/.local/share/edge-work-profile`, your corporate Entra ID / Microsoft 365 cookies and Conditional Access tokens stay completely separate from personal browsing.
-3. **Outlook Work** (`Super + Alt + O`) and **Microsoft Teams** (`Super + Alt + T`) automatically launch inside this isolated profile.
-
-### 3. OneDrive Local Folder Sync (`onedrive-abraunegg`)
-1. Open a terminal and run:
-   ```bash
-   onedrive
-   ```
-2. Open the printed Microsoft login URL in Edge, sign in, and paste the resulting redirect URI back into the terminal.
-3. Test with `onedrive --synchronize --dry-run`, then enable automatic background syncing:
-   ```bash
-   systemctl --user enable --now onedrive
-   ```
-
----
-
-## Setting Up Local 2FA (Ente Auth) Alongside Microsoft Authenticator
-
-Microsoft does not publish a native Linux desktop client for **Microsoft Authenticator** and retired its legacy Edge Autofill extension. To have fast desktop TOTP codes on Omarchy while keeping Microsoft Authenticator on your phone:
-
-### Option A: Mirror Existing TOTP Accounts into Ente Auth (Recommended)
-1. Launch **Ente Auth** (`Super + Shift + K` or `ente_auth`) and create/sign in to an end-to-end encrypted Ente account (or use offline mode).
-2. **Transferring codes from Microsoft Authenticator:**
-   - Microsoft Authenticator does not offer a direct unencrypted JSON/CSV export button.
-   - For accounts where you saved your **2FA setup QR code or secret key** in OneDrive Personal Vault, scan the QR code or enter the setup key directly into **Ente Auth** (`+` → *Enter setup key*). Both Microsoft Authenticator and Ente Auth will generate identical 6-digit codes.
-   - For critical accounts without a saved seed, visit the service's security settings → *Reconfigure 2FA*, scan the new QR code in **both** Microsoft Authenticator (phone) and **Ente Auth** (desktop) before confirming.
-3. **Note on Microsoft Account Passwordless Push Approvals:** Microsoft's own 2-digit number-matching push prompts still require the mobile **Microsoft Authenticator** app; all standard TOTP codes work seamlessly in **Ente Auth**.
-
-### Option B: Migrate Saved Passwords from Microsoft Authenticator to Edge
-1. On your phone, open **Microsoft Authenticator** → **Settings** → **Export passwords** (saves a CSV file).
-2. In **Microsoft Edge** (`Super + Shift + B`), go to `edge://settings/passwords` → click **`...`** (More actions) → **Import passwords** → select **Passwords CSV file**, then securely delete the temporary CSV file.
-
----
-
-## Custom Hyprland Keybindings
-
-Configured in `~/.config/hypr/bindings.lua` on current Omarchy installations, or `~/.config/hypr/bindings.conf` on legacy installations.
-
-### Personal & Native Apps (`Super + Shift + <Key>`)
-| Shortcut | Application |
-| :--- | :--- |
-| `Super + Shift + B` | Microsoft Edge (Personal) |
-| `Super + Shift + E` | Visual Studio Code |
-| `Super + Shift + H` | Herdr Desktop (`herdr-workspace.sh`) |
-| `Super + Shift + G` | Gmail (Web App) |
-| `Super + Shift + O` | Outlook Personal (Web App) |
-| `Super + Shift + F` | Cloudflare Dashboard (Web App) |
-| `Super + Shift + U` | UniFi Site Manager (`unifi.ui.com`) |
-| `Super + Shift + D` | Discord |
-| `Super + Shift + S` | Spotify |
-| `Super + Shift + W` | WhatsApp (Web App) |
-| `Super + Shift + A` | ChatGPT (Web App) |
-| `Super + Shift + C` | Claude Desktop |
-| `Super + Shift + K` | Ente Auth (Desktop 2FA) |
-
-### Isolated Work Profile Apps (`Super + Alt + <Key>`)
-| Shortcut | Application |
-| :--- | :--- |
-| `Super + Alt + B` | Microsoft Edge (Work Profile) |
-| `Super + Alt + O` | Outlook Work (Office 365 Web App) |
-| `Super + Alt + T` | Microsoft Teams (Web App) |
-| `Super + Alt + D` | OneDrive Web |
-
----
-
-## Repository Layout
-
-```text
-ergonex/
-├── bootstrap.sh          # Full Omarchy workstation bootstrapper
-├── ergonex.omp.json      # Harness-aware Oh My Posh v3 theme (HUMAN / HERDR / AGENT)
-├── herdr-workspace.sh    # Herdr Desktop session & workspace launcher
-├── vault-sync.sh         # Encrypted private config backup/restore for OneDrive Personal Vault
-└── README.md             # Setup, vault workflow, Microsoft apps, and 2FA guide
+```bash
+snshah apply --sync
+rclone config
+# Name the remotes snshah-work1, snshah-work2, and snshah-work3.
+snshah drive list work2
+snshah drive mount work2
 ```
+
+In rclone, select the OneDrive backend and complete authentication for the matching tenant. Verify the remote with `drive list` before mounting it. A mount appears at `~/OneDrive/work2` while the command runs. Open that folder in Omarchy's file manager, and press Ctrl+C in the mount terminal to unmount. Ergonex mounts read-only. Use the tenant's web app for moves, uploads, and edits. [rclone OneDrive setup](https://rclone.org/onedrive/)
+
+## ChatGPT Dot and engineering
+
+- **ChatGPT Dot** opens `chatgpt.com/dots` through `snshah open dot`. Connect apps and select the correct ChatGPT workspace inside ChatGPT. Dot access and local desktop capabilities depend on the account and supported client. [OpenAI Dot setup](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)
+- **Herdr** opens through `snshah open herdr`. It uses Herdr Desktop when present and the Omarchy terminal launcher for native Herdr otherwise. Open separate panes for Claude Code and Codex. Give agents that will edit concurrently separate Git worktrees under your workspace and run each from its own checkout.
+- **Claude Code and Codex** use your existing Omarchy-managed runtimes and sign-ins. Run `snshah agent claude /path/to/worktree` or `snshah agent codex /path/to/worktree` in a terminal or Herdr pane.
+- **Local OpenCode** is optional. Run `snshah plan --local-ai` before applying. Setup installs Ollama when needed, starts its system service, pulls the configured model, and writes a dedicated OpenCode config. Change the model in the local profile before pulling if your machine needs a smaller model. Run `snshah agent local` to launch OpenCode with that config.
+- **Agent usage** can be surfaced through Omarchy’s built-in Agents widget where available. The Ergonex panel focuses on launching work and checking local Ollama.
+
+## Shell and desktop integration
+
+`snshah apply` adds one interactive-only block to the user’s `~/.bashrc`, after the existing startup code. New terminals load the shell additions automatically. Existing aliases and functions take precedence.
+
+| Shortcut | Command |
+| --- | --- |
+| `ll` | `ls -al`, including Omarchy’s usual `ls` alias |
+| `gs` | `git status --short --branch` |
+| `gd` / `gds` | Unstaged / staged diff |
+| `gl` | Compact decorated Git graph |
+| `mkcd DIR` | Create a directory and enter it |
+
+Use `snshah shell bash` to inspect the generated code. Zsh users can opt in with `eval "$(snshah shell zsh)"` in their interactive `.zshrc`. Use `snshah context` to print a best-effort `HUMAN`, `HERDR`, or `AGENT` indicator for prompt customization.
+
+The workstation hotkey loads from `~/.config/hypr/snshah.lua`. Check the active bindings with `omarchy menu keybindings --print` if you already use Super + Alt + M.
+
+### Optional Ergonex panel
+
+```bash
+snshah plugin install
+snshah plugin toggle
+snshah plugin remove
+```
+
+The Quickshell panel opens Herdr or one of the work browser profiles and checks local Ollama status when opened. It supports arrow keys and Enter. The plugin source lives under [`plugin/`](plugin/). Installation validates and enables the local copy through Omarchy.
+
+## Encrypted Personal Vault
+
+```bash
+snshah vault status
+snshah vault backup
+snshah vault restore /path/to/ergonex-private-snapshot.tar.gz.age
+```
+
+Backups use age passphrase encryption, with symmetric GnuPG as a fallback. The manifest at `~/.config/ergonex/vault-manifest.txt` lists paths relative to your home. Review it before backing up. It can include credentials, so keep the manifest and archive private. Encrypted snapshots go to `~/OneDrive/Vault-Staging` by default. After opening your **personal** OneDrive and unlocking Personal Vault interactively, upload or move the encrypted snapshot there. The read-only business mounts are independent of this workflow.
+
+Restore accepts the previous Bash version’s age and GPG archives and preserves existing files. Restore into a clean home when possible. If existing files conflict, the command can restore missing files and report a failure for the conflicts. The old `vault-sync.sh` and `herdr-workspace.sh` entry points forward to `snshah`.
+
+## Maintenance and acceptance
+
+`snshah.ts` is the executable TypeScript source and runs from its Bun shebang. Keep user-facing behavior in that file and keep the bootstrap and compatibility scripts small. The installer preserves existing home agent instructions, the stock OpenCode config, and existing shell and Hyprland user lines. Legacy launchers and prompt settings remain available during migration.
+
+```bash
+bun test
+bun ./snshah.ts plan --json
+omarchy plugin validate plugin
+```
+
+The automated test uses a temporary home, covers first apply and rerun, and checks shell startup, existing settings, and the three tenant launch arguments. On an Omarchy test desktop, run the README installer twice. Confirm the second run reports **No changes needed**, start a new terminal and run `alias ll`, then use the chooser to open each tenant. If testing the plugin, install it, open the panel, exercise its actions, and remove it. Run `hyprctl configerrors` to check the active Hyprland configuration. Use `snshah doctor --json` to capture a machine-readable diagnostic summary.
+
+Keep repository changes under the canonical workspace tree. Store local tenant names, sign-ins, browser profiles, and vault contents outside Git.

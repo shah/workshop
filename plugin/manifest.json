@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "shah.ergonex",
+  "name": "Ergonex",
+  "version": "0.1.0",
+  "author": "shah",
+  "description": "Workstation shortcuts and local Ollama status",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Ergonex",
+    "description": "Open Herdr or your work browser and check Ollama",
+    "category": "AI",
+    "allowMultiple": false
+  }
+}
