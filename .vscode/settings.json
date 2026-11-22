@@ -1,0 +1,18 @@
+{
+  "editor.semanticHighlighting.enabled": true,
+  "editor.renderValidationDecorations": "on",
+  "js/ts.validate.enabled": true,
+  "js/ts.implicitProjectConfig.strict": true,
+  "js/ts.implicitProjectConfig.strictNullChecks": true,
+  "js/ts.implicitProjectConfig.strictFunctionTypes": true,
+  "[typescript]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features",
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "file",
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": false,
+    "js/ts.format.enabled": true,
+    "js/ts.preferences.quoteStyle": "double"
+  }
+}

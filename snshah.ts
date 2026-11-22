@@ -269,6 +269,53 @@ function object(value: unknown): value is Record<string, unknown> {
 
 const conf = join(home, ".config/snshah.conf.ts");
 const declarations = join(dirname(conf), "snshah.auto.d.ts");
+const editorWorkspace = join(assetDir, "editor.auto.workspace", "snshah.auto.code-workspace");
+// Keep these in sync with the checked-in .vscode defaults.
+const editorSettings = {
+  "editor.semanticHighlighting.enabled": true,
+  "editor.renderValidationDecorations": "on",
+  "js/ts.validate.enabled": true,
+  "js/ts.implicitProjectConfig.strict": true,
+  "js/ts.implicitProjectConfig.strictNullChecks": true,
+  "js/ts.implicitProjectConfig.strictFunctionTypes": true,
+  "[typescript]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features",
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "file",
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": false,
+    "js/ts.format.enabled": true,
+    "js/ts.preferences.quoteStyle": "double"
+  }
+};
+const editorExtensions = { recommendations: ["oven.bun-vscode"] };
+
+function privateEditorWorkspace(): string {
+  return JSON.stringify({
+    // This folder contains generated editor metadata only. The config opens as a separate file.
+    folders: [{ path: ".", name: "Workstation configuration" }],
+    settings: {
+      ...editorSettings,
+      "files.autoSave": "off",
+      "files.hotExit": "off",
+      "workbench.localHistory.enabled": false,
+    },
+    extensions: editorExtensions,
+    tasks: {
+      version: "2.0.0",
+      tasks: [{
+        label: "Check workstation config",
+        type: "process",
+        command: bin,
+        args: ["config", "check"],
+        group: { kind: "test", isDefault: true },
+        problemMatcher: [],
+      }],
+    },
+  }, null, 2) + "\n";
+}
+
 const menuPath = join(home, ".config/omarchy/extensions/omarchy-menu.jsonc");
 const menuId = "shahid-workstation";
 const commandScopes = ["claude", "codex", "local", "drive"] as const;
@@ -277,14 +324,24 @@ const configTypes = `export type Secret =
   | { variable: string; value: string; scope: "shell" }
   | { variable: string; value: string; scope: "command"; commands: readonly ("claude" | "codex" | "local" | "drive")[] };
 export type TenantFiles = { kind: "web" } | { kind: "rclone"; remote: string };
-export type Tenant = { id: string; label: string; files: TenantFiles };
+export type Tenant = {
+  /** Stable ID used in the CLI and local paths. Use lowercase letters, digits and hyphens. */
+  id: string;
+  /** Private name displayed by the account chooser. */
+  label: string;
+  /** Use OneDrive on the web, or add a named rclone remote for a read-only mount. */
+  files: TenantFiles;
+};
 export type WorkstationConfig = {
   personal: string;
+  /** Work tenants in menu order. Leave empty for a personal-only setup. */
   work: readonly Tenant[];
+  /** Absolute path that contains your managed repository checkouts. */
   workspacesRoot: string;
   prompt: { kind: "starship" } | { kind: "posh" };
   browser: { kind: "omarchy" } | { kind: "edge-default" };
   localAI: { kind: "off" } | { kind: "ollama"; model: string };
+  /** Prefer command scope. Shell-scoped secrets are inherited by child processes. */
   secrets: readonly Secret[];
 };
 `;
@@ -393,7 +450,7 @@ function configSource(settings: WorkstationConfig): string {
     'import type { WorkstationConfig } from "./snshah.auto";',
     "// This private TypeScript file is the workstation configuration. Keep mode 0600.",
     beginSecrets, `const secrets = ${JSON.stringify(secrets, null, 2)} satisfies WorkstationConfig["secrets"];`, endSecrets,
-    `const preferences = ${JSON.stringify(preferences, null, 2)};`.replace(/;$/, " as const;"),
+    `const preferences = ${JSON.stringify(preferences, null, 2)} satisfies Omit<WorkstationConfig, "secrets">;`,
     "export default { ...preferences, secrets } satisfies WorkstationConfig;",
     "",
   ].join("\n");
@@ -430,6 +487,10 @@ async function notify(message: string, backup = false): Promise<void> {
 
 async function editConfig(): Promise<void> {
   let previous = await privateConfigBytes();
+  // Refresh the types even if this edit session starts before the next apply.
+  if (await read(declarations) !== configTypes) await atomicFile(declarations, configTypes);
+  const workspace = privateEditorWorkspace();
+  if (await read(editorWorkspace) !== workspace) await atomicFile(editorWorkspace, workspace, 0o600);
   const { watch } = await import("node:fs");
   const watcher = watch(dirname(conf), (_event, name) => {
     if (name === basename(conf)) {
@@ -448,7 +509,7 @@ async function editConfig(): Promise<void> {
         await notify("Workstation config changed since its last encrypted backup.", true);
     } catch { await notify("The workstation config could not be validated. Run Configuration → Check.").catch(() => {}); }
   }
-  try { await run(["code", "--wait", conf]); }
+  try { await run(["code", "--new-window", "--wait", editorWorkspace, conf]); }
   finally { watcher.close(); clearTimeout(timer); await saved(); }
 }
 
@@ -461,9 +522,9 @@ async function setSecret(variable: string): Promise<void> {
   const first = lines.indexOf(beginSecrets);
   const last = lines.indexOf(endSecrets);
   const section = lines.slice(first + 1, last).join("\n");
-  const literal = /^const secrets = ([\s\S]+) satisfies WorkstationConfig\["secrets"\];$/.exec(section)?.[1];
+  const literal = /^\s*const\s+secrets\s*=\s*([\s\S]+?)\s+satisfies\s+WorkstationConfig\s*\[\s*["']secrets["']\s*\]\s*;?\s*$/.exec(section)?.[1];
   let managed = false;
-  try { managed = literal !== undefined && JSON.stringify(JSON.parse(literal)) === JSON.stringify(current.secrets); }
+  try { managed = literal !== undefined && JSON.stringify(Bun.JSONC.parse(literal)) === JSON.stringify(current.secrets); }
   catch { /* A custom expression should be edited directly. */ }
   if (first < 0 || last <= first || !managed)
     throw new Error("The secret declarations were edited as code. Set the value directly in VS Code, or format the marked declarations as generated JSON literals.");
@@ -527,6 +588,7 @@ async function plan(features: Features): Promise<Step[]> {
   const root = features.workspaceRoot ?? current.workspacesRoot;
   const checkout = checkoutPath(root);
   await file(declarations, configTypes);
+  await file(editorWorkspace, privateEditorWorkspace(), { private: true });
   if (!await exists(conf)) await file(conf, configSource(current), { private: true });
   if (!await exists(checkout)) steps.push({ kind: "checkout", path: checkout });
   else if (!await exists(join(checkout, ".git")) || !knownWorkstationRemote(capture(["git", "-C", checkout, "remote", "get-url", "origin"])))
@@ -1216,13 +1278,34 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert.equal((await stat(fixtureConf)).mode & 0o777, 0o600);
     assert.equal(await readFile(join(fixture, ".bashrc"), "utf8"), rc);
     await writeFile(join(tools, "code"),
-      '#!/bin/sh\nprintf "\\n// saved from fixture editor\\n" >> "$2"\nsleep 0.4\n', { mode: 0o755 });
+      '#!/bin/sh\nprintf "%s\\n" "$@" > "$HOME/editor-args.auto.log"\nprintf "\\n// saved from fixture editor\\n" >> "$4"\nsleep 0.4\n', { mode: 0o755 });
     await writeFile(join(tools, "omarchy-notification-send"),
       '#!/bin/sh\nprintf "%s\\n" "$@" > "$HOME/notification.auto.log"\n', { mode: 0o755 });
     invoke("snshah", "config", "edit");
+    const workspacePath = join(fixture, ".local/share/snshah/editor.auto.workspace/snshah.auto.code-workspace");
+    const workspace = JSON.parse(await readFile(workspacePath, "utf8"));
+    const editorArgs = (await readFile(join(fixture, "editor-args.auto.log"), "utf8")).trimEnd().split("\n");
+    assert.deepEqual(editorArgs, ["--new-window", "--wait", workspacePath, fixtureConf]);
+    assert.equal(workspace.settings["[typescript]"]["editor.formatOnSave"], true);
+    assert.equal(workspace.settings["workbench.localHistory.enabled"], false);
+    assert.deepEqual(workspace.folders, [{ path: ".", name: "Workstation configuration" }]);
+    assert.deepEqual(workspace.tasks.tasks[0].args, ["config", "check"]);
+    assert.deepEqual(workspace.extensions, editorExtensions);
+    assert.deepEqual(JSON.parse(await readFile(join(source, ".vscode/settings.json"), "utf8")), editorSettings);
+    assert.deepEqual(JSON.parse(await readFile(join(source, ".vscode/extensions.json"), "utf8")), editorExtensions);
     for (let i = 0; i < 10 && !await exists(join(fixture, "notification.auto.log")); i++) await Bun.sleep(40);
     const notification = await readFile(join(fixture, "notification.auto.log"), "utf8");
     assert(notification.includes("Back Up Now") && !notification.includes(fake));
+    const formatted = configSource({
+      ...settings,
+      secrets: [{ variable: "EXAMPLE_ROTATE_TOKEN", value: "", scope: "command", commands: ["codex"] }],
+    }).replace('\n  }\n] satisfies WorkstationConfig["secrets"];',
+      "\n  },\n] satisfies WorkstationConfig['secrets']");
+    await writeFile(fixtureConf, formatted);
+    await writeFile(join(tools, "gum"), '#!/bin/sh\ntest "$1" = input && test "$4" = --password || exit 2\nprintf "%s\\n" "new-fixture-token"\n', { mode: 0o755 });
+    invoke("snshah", "config", "set-secret", "EXAMPLE_ROTATE_TOKEN");
+    const rotated = await interpretConfig(await readFile(fixtureConf, "utf8"));
+    assert.equal(rotated.secrets[0]?.value, "new-fixture-token");
     const fresh = join(fixture, "home.auto.fresh");
     await mkdir(join(fresh, ".config/hypr"), { recursive: true });
     await writeFile(join(fresh, ".config/hypr/hyprland.lua"), "");

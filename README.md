@@ -52,7 +52,7 @@ The native menu is generated from the command table embedded in `snshah.ts`. Oma
 The only workstation settings file is **`~/.config/snshah.conf.ts`**. Setup creates it with mode **0600**. You must own the file, and it must be a regular file. It contains executable TypeScript, so review it before loading a copy from another machine. The generated `snshah.auto.d.ts` exposes the config types to VS Code.
 
 1. Open **Configuration → Edit in VS Code** and add tenants to the `work` array. A fresh install starts with an empty array. Use **Name my profiles** to rename entries you’ve already added. The screenshots use example tenants.
-2. Open **Configuration → Edit in VS Code** or run `snshah config edit`. The editor command watches for saves and checks the config. After a valid change, select **Back Up Now** in the notification or **Vault → Back up now** in the menu.
+2. Open **Configuration → Edit in VS Code** or run `snshah config edit`. This opens the private config in a dedicated VS Code window with format-on-save, autocomplete, and inline TypeScript diagnostics. See [Editing in VS Code](#editing-in-vs-code).
 3. Run `snshah config check`, followed by `snshah plan` and `snshah apply` when a setting requires package or desktop changes.
 
 Configuration options include:
@@ -77,6 +77,15 @@ work: [
 ```
 
 Use the tenant ID in CLI commands. Renaming or reordering an entry leaves its browser directory and mount path intact. After adding or removing entries, run `snshah apply` to update launchers and menu routes. Removing an entry leaves its browser data on disk.
+
+### Editing in VS Code
+
+Install Visual Studio Code and ensure the `code` command is on your PATH. Always open the private file through **Configuration → Edit in VS Code** or `snshah config edit` to get the dedicated workspace and save notifications. The generated workspace keeps the rest of `~/.config` out of the Explorer. The repo also includes [.vscode defaults](.vscode) for its own checkout.
+
+- Save with **Ctrl+S** to format the file. VS Code’s built-in TypeScript support provides syntax coloring, completion, hover help, and errors for invalid types or tagged choices. Use **Ctrl+Shift+M** to open the Problems panel.
+- Run **Tasks: Run Task → Check workstation config** for runtime checks such as duplicate tenant IDs, invalid secret declarations, and file permissions. VS Code may ask you to trust the local workspace before running the task. The task is started manually.
+- After a valid change, choose **Back Up Now** in the notification or **Vault → Back up now**. The private workspace disables auto-save, local history, and hot-exit backups.
+- The [official Bun extension](https://marketplace.visualstudio.com/items?itemName=oven.bun-vscode) is recommended in both workspaces. The built-in formatting and config diagnostics work without it.
 
 ### Shell aliases and API tokens
 
@@ -143,4 +152,4 @@ bun --no-env-file ./snshah.ts test --published
 snshah plan --json
 ```
 
-The self-test uses a temporary home, fake tokens, simulated system operations, and a mock age executable. For desktop acceptance, open the native submenu, launch an app, save an edit through VS Code, and exercise real age backup and verify. A second apply with identical settings should report **No changes needed**. Run `hyprctl configerrors` after changing bindings.
+The self-test uses a temporary home, fake tokens, simulated system operations, and a mock age executable. It also checks the generated VS Code workspace, the save reminder, and hidden token entry after formatting. For desktop acceptance, open the native submenu, launch an app, save an edit through VS Code, and exercise real age backup and verify. A second apply with identical settings should report **No changes needed**. Run `hyprctl configerrors` after changing bindings.
