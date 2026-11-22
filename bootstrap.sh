@@ -13,7 +13,7 @@ fi
 if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
   source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
   if [[ -f "$source_dir/snshah.ts" ]]; then
-    exec bun "$source_dir/snshah.ts" apply "$@"
+    exec bun --no-env-file "$source_dir/snshah.ts" apply "$@"
   fi
 fi
 
@@ -25,4 +25,4 @@ scratch="$(mktemp -d "${TMPDIR:-/tmp}/workstation.auto.bootstrap-XXXXXX")"
 trap 'rm -rf -- "$scratch"' EXIT
 curl -fsSL "https://codeload.github.com/shah/workstation/tar.gz/$revision" -o "$scratch/source.auto.tar.gz"
 tar -xzf "$scratch/source.auto.tar.gz" -C "$scratch" --strip-components=1
-bun "$scratch/snshah.ts" apply "$@"
+bun --no-env-file "$scratch/snshah.ts" apply "$@"
