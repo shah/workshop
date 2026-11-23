@@ -2,29 +2,40 @@
 import assert from "node:assert/strict";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { homedir, hostname, tmpdir } from "node:os";
+import { homedir, userInfo, hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
-type TenantFiles = { kind: "web" } | { kind: "rclone"; remote: string };
-type Tenant = { id: string; label: string; files: TenantFiles };
+type OneDriveProfile = { username: string; remote: string };
+type TenantFiles = { kind: "web" } | ({ kind: "rclone" } & OneDriveProfile);
+type Tenant = { id: string; label: string; username?: string; files: TenantFiles };
 const workApps = ["browser", "outlook", "calendar", "teams", "onedrive"] as const;
 type WorkApp = typeof workApps[number];
-const personalApps = ["gmail", "dot", "herdr", "menu"] as const;
+const everyday = {
+  gmail: { name: "Gmail", url: "https://mail.google.com/", icon: "mail-message-new", entries: ["Gmail", "Google Mail"] },
+  voice: { name: "Google Voice", url: "https://voice.google.com/", icon: "call-start", entries: ["Google Voice"] },
+  cloudflare: { name: "Cloudflare Admin", url: "https://dash.cloudflare.com/", icon: "network-server", entries: ["Cloudflare Admin", "Cloudflare"] },
+  unifi: { name: "UniFi Admin", url: "https://unifi.ui.com/", icon: "network-workgroup", entries: ["UniFi Admin", "UniFi"] },
+  whatsapp: { name: "WhatsApp", url: "https://web.whatsapp.com/", icon: "whatsapp", entries: ["WhatsApp", "whatsapp"] },
+  discord: { name: "Discord", url: "https://discord.com/channels/@me", icon: "omarchy-discord", entries: ["Discord", "discord", "com.discordapp.Discord"] },
+} as const;
+const everydayIds = ["gmail", "voice", "cloudflare", "unifi", "whatsapp", "discord"] as const;
+const personalApps = [...everydayIds, "spotify", "dot", "herdr", "menu", "hints"] as const;
 type PersonalApp = typeof personalApps[number];
 const agents = ["claude", "codex", "local"] as const;
 type Agent = typeof agents[number];
-type Features = { local: boolean; sync: boolean; defaultEdge: boolean; posh: boolean; workspaceRoot?: string };
+type Features = { local: boolean; workspaceRoot?: string };
 type Command =
   | { kind: "help" | "context" }
   | { kind: "workspace"; root?: string }
   | { kind: "test"; published: boolean }
   | { kind: "plan" | "apply"; json: boolean; features: Features }
   | { kind: "doctor"; json: boolean }
+  | { kind: "status"; details: boolean }
   | { kind: "shell"; shell: "bash" | "zsh" }
   | { kind: "open"; app: PersonalApp }
   | { kind: "work"; tenant: string; app: WorkApp }
   | { kind: "agent"; agent: Agent; directory: string }
-  | { kind: "drive"; tenant: string; action: "list" | "mount" }
+  | { kind: "drive"; tenant: string; action: "list" | "mount" | "connect" | "folder" }
   | { kind: "vault"; action: "status" | "backup" }
   | { kind: "restore" | "verify"; archive?: string; overwrite: boolean }
   | { kind: "config"; action: "edit" | "check" | "setup" }
@@ -38,6 +49,9 @@ type Step =
   | { kind: "command"; id: string; argv: string[] }
   | { kind: "wait"; service: "ollama" }
   | { kind: "checkout"; path: string }
+  | { kind: "directory"; path: string }
+  | { kind: "mount"; id: string; path: string; remote: string }
+  | { kind: "editor" }
   | { kind: "remove"; path: string; previous: string };
 
 const home = homedir();
@@ -46,7 +60,7 @@ const data = process.env.XDG_DATA_HOME || join(home, ".local/share");
 const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
-const product = "Shahid Shah Workstation";
+const product = "Shahid's Workstation";
 const remote = "https://github.com/shah/workstation.git";
 const defaultWorkspaceRoot = join(home, "Work");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
@@ -56,32 +70,195 @@ const pluginFiles = {
   "manifest.json": `{
   "schemaVersion": 1,
   "id": "shah.workstation",
-  "name": "Shahid Shah Workstation",
-  "version": "0.1.0",
+  "name": "Shahid's Workstation",
+  "version": "0.2.0",
   "author": "shah",
   "description": "Workstation shortcuts and local Ollama status",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "Panel.auto.qml" },
   "barWidget": {
-    "displayName": "Shahid Shah Workstation",
-    "description": "Open Herdr or your work browser and check Ollama",
+    "displayName": "Shahid's Workstation",
+    "description": "Drive mounts, local AI, config backup, and app shortcuts",
     "category": "AI",
     "allowMultiple": false
   }
 }
 `,
-  "Panel.auto.qml": `import QtQuick
+  "Panel.auto.qml": `pragma ComponentBehavior: Bound
+import QtQuick
 import Quickshell
+import Quickshell.Io
+import qs.Commons as Commons
 import qs.Ui as Ui
 
 Ui.Panel {
   id: root
   moduleName: "shah.workstation"
-  Ui.BarIconButton {
+  ipcTarget: root.moduleName
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+  readonly property string cli: Quickshell.env("HOME") + "/.local/bin/snshah"
+  property var summary: ({})
+  property var details: ({})
+  property int selected: 0
+  readonly property bool compact: button.vertical || Quickshell.screens.some(screen => screen.width < 1050)
+  readonly property string summaryText: summary.total === undefined ? "Shahid’s Workstation" :
+    "Shahid’s Workstation · " + summary.mounted + "/" + summary.total + " drives · " +
+    (summary.ai === "online" ? "AI ready" : summary.ai === "offline" ? "AI offline" : "AI off") +
+    (summary.backup === "due" ? " · Backup due" : "")
+  readonly property string narrowText: summary.total === undefined ? "Shahid’s Workstation" :
+    "Shahid’s Workstation · " + summary.mounted + "/" + summary.total +
+    (summary.ai === "online" ? " · AI" : summary.ai === "offline" ? " · AI ↓" : "") +
+    (summary.backup === "due" ? " · !" : "")
+  readonly property var actions: {
+    const rows = [
+      { label: "Workstation menu", args: ["menu"] },
+      { label: "Apps and accounts", args: ["open", "menu"] }
+    ]
+    for (const drive of (root.details.drives || [])) {
+      const state = { "mounted": "Mounted", "configured": "Ready to mount",
+        "needs-sign-in": "Sign-in required", "occupied": "Mount path in use" }[drive.state]
+      if (!state) continue
+      const section = drive.id === "personal" ? "drive" : "tenant-" + drive.id
+      const action = drive.state === "mounted" ? "folder" : drive.state === "configured" ? "mount" :
+        drive.state === "needs-sign-in" ? "connect" : ""
+      rows.push({ label: drive.label + " · " + state,
+        args: action ? ["menu", "run", section + "." + action] : null })
+    }
+    rows.push({ label: "Herdr", args: ["open", "herdr"] })
+    rows.push({ label: "Claude Code", args: ["menu", "run", "agents.claude"] })
+    rows.push({ label: "Codex", args: ["menu", "run", "agents.codex"] })
+    if (root.summary.ai !== "off")
+      rows.push({ label: "Local OpenCode", args: ["menu", "run", "agents.local"] })
+    rows.push({ label: root.summary.backup === "current" ? "Back up config again" : "Back up config",
+      args: ["menu", "run", "vault.backup"] })
+    rows.push({ label: "Edit config in VS Code", args: ["config", "edit"] })
+    return rows
+  }
+
+  function refresh() {
+    if (root.opened) {
+      if (!detailJob.running) detailJob.running = true
+    } else if (!statusJob.running) statusJob.running = true
+  }
+  function acceptStatus(text, detailed) {
+    try {
+      const value = JSON.parse(text)
+      root.summary = value
+      if (detailed && root.opened) root.details = value
+    } catch (error) {
+      if (detailed && root.opened) root.details = ({})
+    }
+  }
+  function activate(index) {
+    const row = root.actions[index]
+    if (!row || !row.args) return
+    Quickshell.execDetached([root.cli].concat(row.args))
+    root.close()
+  }
+
+  onOpenedChanged: {
+    if (root.opened) {
+      root.selected = 0
+      root.refresh()
+    } else root.details = ({})
+  }
+  Component.onCompleted: refresh()
+  Timer {
+    interval: 30000
+    repeat: true
+    running: true
+    onTriggered: root.refresh()
+  }
+  Process {
+    id: statusJob
+    command: [root.cli, "status"]
+    stdout: StdioCollector { onStreamFinished: root.acceptStatus(text, false) }
+  }
+  Process {
+    id: detailJob
+    command: [root.cli, "status", "--details"]
+    stdout: StdioCollector { onStreamFinished: root.acceptStatus(text, true) }
+  }
+
+  Ui.WidgetButton {
+    id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰆍"
-    onPressed: Quickshell.execDetached([Quickshell.env("HOME") + "/.local/bin/snshah", "menu"])
+    text: root.compact ? "󰆍" : root.narrowText
+    tooltipText: root.summaryText
+    active: root.opened
+    useActiveColor: false
+    onPressed: function(mouseButton) {
+      if (mouseButton === Qt.RightButton) Quickshell.execDetached([root.cli, "menu"])
+      else root.toggle()
+    }
+  }
+
+  Ui.KeyboardPanel {
+    id: panel
+    bar: root.bar
+    anchorItem: button
+    owner: root
+    open: root.opened
+    focusTarget: panel.loadedContent
+    contentWidth: panel.fittedContentWidth(Commons.Style.space(390))
+    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Commons.Style.space(540))
+    content: Ui.PanelKeyCatcher {
+      implicitHeight: rows.implicitHeight
+      onCloseRequested: root.close()
+      onMoveRequested: function(dx, dy) {
+        if (dy === 0) return
+        let i = root.selected
+        for (let n = 0; n < root.actions.length; n++) {
+          i = (i + dy + root.actions.length) % root.actions.length
+          if (root.actions[i].args) break
+        }
+        root.selected = i
+        const row = rowItems.itemAt(i)
+        if (row) scroll.contentY = Math.max(0, Math.min(scroll.contentHeight - scroll.height,
+          row.y < scroll.contentY ? row.y : Math.max(scroll.contentY, row.y + row.height - scroll.height)))
+      }
+      onActivateRequested: root.activate(root.selected)
+      Flickable {
+        id: scroll
+        anchors.fill: parent
+        clip: true
+        contentWidth: width
+        contentHeight: rows.implicitHeight
+        Column {
+          id: rows
+          width: scroll.width
+          spacing: Commons.Style.space(4)
+          Ui.PanelSectionHeader {
+            width: parent.width
+            text: "Shahid’s Workstation"
+          }
+          Text {
+            width: parent.width
+            text: root.summary.ai === "online" ? "Ollama online · " + (root.details.model || "Local AI") :
+              root.summary.ai === "offline" ? "Ollama offline" : "Local AI off"
+            color: Commons.Color.foreground
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+          }
+          Repeater {
+            id: rowItems
+            model: root.actions
+            delegate: Ui.Button {
+              required property int index
+              required property var modelData
+              width: rows.width
+              text: modelData.label
+              enabled: !!modelData.args
+              selected: index === root.selected
+              leftAlign: true
+              onClicked: root.activate(index)
+            }
+          }
+        }
+      }
+    }
   }
 }
 `,
@@ -103,15 +280,16 @@ const addedAliases = {
 class UsageError extends Error {}
 const usage = `Usage: snshah <command>
 
-  plan|apply [--workspaces-root PATH] [--local-ai] [--sync] [--default-edge] [--posh] [--json]
+  plan|apply [--workspaces-root PATH] [--local-ai] [--json]
   workspace [--workspaces-root PATH]
   test [--published]
   doctor [--json]
   shell [bash|zsh]
-  open gmail|dot|herdr|menu
+  open gmail|voice|cloudflare|unifi|whatsapp|discord|spotify|dot|herdr|menu|hints
   open TENANT [browser|outlook|calendar|teams|onedrive]
   agent claude|codex|local [directory]
-  drive list|mount TENANT
+  drive list|mount|connect|folder PERSONAL_OR_TENANT
+  status [--details]
   vault status|backup|verify|restore [archive] [--overwrite]
   config setup|check|edit|set-secret [VARIABLE]
   menu
@@ -136,17 +314,17 @@ function parse(argv: string[]): Command {
         const path = argv[++i];
         if (!path || path.startsWith("--")) throw new UsageError("--workspaces-root requires a path.");
         root = resolve(path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
-      } else if (kind === "workspace" || !member(["--local-ai", "--sync", "--default-edge", "--posh", "--json"], flag)) {
+      } else if (kind === "workspace" || !member(["--local-ai", "--json"], flag)) {
         throw new UsageError(`Unknown option: ${flag}`);
       }
     }
     if (kind === "workspace") return { kind, root };
     return { kind, json: flags.has("--json"), features: {
-      local: flags.has("--local-ai"), sync: flags.has("--sync"),
-      defaultEdge: flags.has("--default-edge"), posh: flags.has("--posh"), workspaceRoot: root,
+      local: flags.has("--local-ai"), workspaceRoot: root,
     } };
   }
   if (kind === "test" && (!first || first === "--published") && !second) return { kind, published: !!first };
+  if (kind === "status" && (!first || first === "--details") && !second) return { kind, details: !!first };
   if (kind === "doctor" && (!first || first === "--json") && !second) return { kind, json: !!first };
   if (kind === "shell" && !second && (!first || member(["bash", "zsh"], first))) return { kind, shell: first === "zsh" ? "zsh" : "bash" };
   if (kind === "context" && !first) return { kind };
@@ -155,7 +333,7 @@ function parse(argv: string[]): Command {
     return { kind: "work", tenant: first, app: member(workApps, second) ? second : "outlook" };
   if (kind === "agent" && !rest.length && member(agents, first))
     return { kind, agent: first, directory: resolve(second ?? process.cwd()) };
-  if (kind === "drive" && !rest.length && member(["list", "mount"], first) && validTenantId(second))
+  if (kind === "drive" && !rest.length && member(["list", "mount", "connect", "folder"], first) && second && (second === "personal" || validTenantId(second)))
     return { kind, action: first, tenant: second };
   if (kind === "vault" && !second && member(["status", "backup"], first)) return { kind, action: first };
   if (kind === "vault" && (first === "restore" || first === "verify")) {
@@ -323,17 +501,27 @@ type Scope = typeof commandScopes[number];
 const configTypes = `export type Secret =
   | { variable: string; value: string; scope: "shell" }
   | { variable: string; value: string; scope: "command"; commands: readonly ("claude" | "codex" | "local" | "drive")[] };
-export type TenantFiles = { kind: "web" } | { kind: "rclone"; remote: string };
+export type OneDriveProfile = { username: string; remote: string };
+export type TenantFiles = { kind: "web" } | ({ kind: "rclone" } & OneDriveProfile);
 export type Tenant = {
   /** Stable ID used in the CLI and local paths. Use lowercase letters, digits and hyphens. */
   id: string;
   /** Private name displayed by the account chooser. */
   label: string;
+  /** Optional Microsoft sign-in hint. */
+  username?: string;
   /** Use OneDrive on the web, or add a named rclone remote for a read-only mount. */
   files: TenantFiles;
 };
+export type AccountHint =
+  | { kind: "gmail" | "voice" | "spotify" | "discord"; username: string }
+  | { kind: "whatsapp"; phone: string }
+  | { kind: "cloudflare"; username: string; account?: string }
+  | { kind: "unifi"; username: string; site?: string };
 export type WorkstationConfig = {
   personal: string;
+  personalOneDrive: OneDriveProfile;
+  accounts: readonly AccountHint[];
   /** Work tenants in menu order. Leave empty for a personal-only setup. */
   work: readonly Tenant[];
   /** Absolute path that contains your managed repository checkouts. */
@@ -349,8 +537,15 @@ export type WorkstationConfig = {
 type Secret =
   | { variable: string; value: string; scope: "shell" }
   | { variable: string; value: string; scope: "command"; commands: readonly Scope[] };
+type AccountHint =
+  | { kind: "gmail" | "voice" | "spotify" | "discord"; username: string }
+  | { kind: "whatsapp"; phone: string }
+  | { kind: "cloudflare"; username: string; account?: string }
+  | { kind: "unifi"; username: string; site?: string };
 type WorkstationConfig = {
   personal: string;
+  personalOneDrive: OneDriveProfile;
+  accounts: readonly AccountHint[];
   work: readonly Tenant[];
   workspacesRoot: string;
   prompt: { kind: "starship" } | { kind: "posh" };
@@ -374,20 +569,45 @@ function tenantById(current: WorkstationConfig, id: string): Tenant {
   return tenant;
 }
 
+function validOneDrive(value: unknown): value is OneDriveProfile {
+  return object(value) && typeof value.username === "string" &&
+    /^[A-Za-z0-9_][A-Za-z0-9_.@+-]{0,127}$/.test(value.username) && value.username.toLowerCase() !== "vault-staging" &&
+    typeof value.remote === "string" && /^[\w][\w .-]{0,63}$/.test(value.remote);
+}
+
 function validateConfig(v: unknown): asserts v is WorkstationConfig {
   if (!object(v)) throw new Error("Export a WorkstationConfig object.");
   if (!validLabel(v.personal)) throw new Error("Invalid personal profile label.");
+  if (!validOneDrive(v.personalOneDrive)) throw new Error("Invalid personal OneDrive username or remote.");
+  if (!Array.isArray(v.accounts)) throw new Error("Expected an account hints array.");
+  const services = new Set<string>();
+  for (const hint of v.accounts) {
+    if (!object(hint) || typeof hint.kind !== "string" || !member([...everydayIds, "spotify"], hint.kind) || services.has(hint.kind))
+      throw new Error("Invalid or duplicate account hint.");
+    const keys = hint.kind === "whatsapp" ? ["kind", "phone"] : hint.kind === "cloudflare" ? ["kind", "username", "account"] :
+      hint.kind === "unifi" ? ["kind", "username", "site"] : ["kind", "username"];
+    const required = hint.kind === "whatsapp" ? hint.phone : hint.username;
+    if (!validLabel(required) || Object.entries(hint).some(([key, value]) => !keys.includes(key) || key !== "kind" && !validLabel(value)))
+      throw new Error("Invalid account hint fields. Store sign-in hints only.");
+    services.add(hint.kind);
+  }
+  const mountNames = new Set([v.personalOneDrive.username.toLowerCase()]);
   if (!Array.isArray(v.work)) throw new Error("Expected an ordered work tenant array.");
   const ids = new Set<string>();
   const labels = new Set<string>();
   for (const [i, p] of v.work.entries()) {
-    if (!object(p) || !validTenantId(p.id) || !validLabel(p.label) || !object(p.files) || !(p.files.kind === "web" ||
-      p.files.kind === "rclone" && typeof p.files.remote === "string" && /^[\w][\w .-]{0,63}$/.test(p.files.remote)))
+    if (!object(p) || !validTenantId(p.id) || !validLabel(p.label) || p.username !== undefined && !validLabel(p.username) || !object(p.files) || !(p.files.kind === "web" ||
+      p.files.kind === "rclone" && validOneDrive(p.files)))
       throw new Error(`Invalid work profile at index ${i}.`);
     if (ids.has(p.id)) throw new Error(`Duplicate tenant ID: ${p.id}.`);
     if (labels.has(p.label)) throw new Error(`Duplicate tenant label at index ${i}.`);
     ids.add(p.id);
     labels.add(p.label);
+    if ("kind" in p.files && p.files.kind === "rclone" && validOneDrive(p.files)) {
+      const name = p.files.username.toLowerCase();
+      if (mountNames.has(name)) throw new Error("Two OneDrive profiles use the same mount username.");
+      mountNames.add(name);
+    }
   }
   if (typeof v.workspacesRoot !== "string" || !isAbsolute(v.workspacesRoot) || /[\x00-\x1f]/.test(v.workspacesRoot))
     throw new Error("workspacesRoot must be an absolute path.");
@@ -436,9 +656,10 @@ async function interpretConfig(text: string): Promise<WorkstationConfig> {
 
 function initialConfig(features?: Features): WorkstationConfig {
   return {
-    personal: "Personal", work: [], workspacesRoot: features?.workspaceRoot ?? defaultWorkspaceRoot,
-    prompt: { kind: features?.posh ? "posh" : "starship" },
-    browser: { kind: features?.defaultEdge ? "edge-default" : "omarchy" },
+    personal: "Personal", personalOneDrive: { username: userInfo().username, remote: "snshah-personal" }, accounts: [],
+    work: [], workspacesRoot: features?.workspaceRoot ?? defaultWorkspaceRoot,
+    prompt: { kind: "posh" },
+    browser: { kind: "edge-default" },
     localAI: features?.local ? { kind: "ollama", model: defaultModel } : { kind: "off" },
     secrets: [],
   };
@@ -462,8 +683,8 @@ async function settings(): Promise<WorkstationConfig> {
 
 function shellQuote(input: string): string { return "'" + input.replaceAll("'", "'\\''") + "'"; }
 
-async function secretEnvironment(scope: Scope): Promise<NodeJS.ProcessEnv> {
-  const current = await settings();
+async function secretEnvironment(scope: Scope, config?: WorkstationConfig): Promise<NodeJS.ProcessEnv> {
+  const current = config ?? await settings();
   const env = { ...process.env };
   for (const secret of current.secrets)
     if (secret.value && secret.scope === "command" && secret.commands.includes(scope)) env[secret.variable] = secret.value;
@@ -560,7 +781,6 @@ async function createCheckout(path: string): Promise<void> {
 
 function appEntries(work: readonly Tenant[]) {
   return [
-    { name: `${product} Gmail`, url: "https://mail.google.com/", icon: "mail-message-new", args: "open gmail" },
     { name: `${product} ChatGPT Dot`, url: "https://chatgpt.com/dots", icon: "system-help", args: "open dot" },
     ...work.flatMap(({ id }) => [
       { name: `${product} Outlook (${id})`, url: urls.outlook, icon: "mail-message-new", args: `open ${id} outlook` },
@@ -569,11 +789,87 @@ function appEntries(work: readonly Tenant[]) {
   ];
 }
 
+async function enabledLauncher(names: readonly string[]): Promise<string | undefined> {
+  const locations = [data, ...(process.env.XDG_DATA_DIRS ?? "/usr/local/share:/usr/share").split(":")];
+  for (const name of names) {
+    for (const base of locations) {
+      const entry = await read(join(base, "applications", name + ".desktop"));
+      if (!entry) continue;
+      if (!/^\s*(Hidden|NoDisplay)\s*=\s*true\s*$/mi.test(entry) && /^Exec=/m.test(entry))
+        return name;
+      break; // A user-level hidden entry masks the same system ID.
+    }
+  }
+}
+
+type DriveTarget = { id: string; label: string; profile: OneDriveProfile };
+type DriveState = "mounted" | "configured" | "needs-sign-in" | "occupied";
+type DriveStatus = { id: string; state: DriveState; path: string; remote: string; label: string };
+function driveTargets(current: WorkstationConfig): DriveTarget[] {
+  return [
+    { id: "personal", label: current.personal, profile: current.personalOneDrive },
+    ...current.work.flatMap(tenant => tenant.files.kind === "rclone" ?
+      [{ id: tenant.id, label: tenant.label, profile: tenant.files }] : []),
+  ];
+}
+function mountPath(profile: OneDriveProfile): string { return join(home, "OneDrive", profile.username); }
+function driveStatus(current: WorkstationConfig, env = process.env): DriveStatus[] {
+  const remotes = new Set(capture(["rclone", "listremotes"], env)?.split(/\r?\n/) ?? []);
+  return driveTargets(current).map(({ id, label, profile }) => {
+    const path = mountPath(profile);
+    const remote = profile.remote + ":";
+    const mounted = capture(["findmnt", "-n", "-o", "SOURCE,FSTYPE", "--mountpoint", path]);
+    const state = mounted ? (/\s+fuse\.rclone$/.test(mounted) && mounted.replace(/\s+fuse\.rclone$/, "") === remote ? "mounted" : "occupied")
+      : remotes.has(remote) ? "configured" : "needs-sign-in";
+    return { id, state, path, remote, label };
+  });
+}
+async function mountDrive(entry: DriveStatus, env: NodeJS.ProcessEnv): Promise<void> {
+  if (entry.state === "mounted") return;
+  if (entry.state === "occupied") throw new Error("OneDrive mount directory is occupied by another filesystem.");
+  if (entry.state === "needs-sign-in") throw new Error("Connect this OneDrive account before mounting.");
+  await mkdir(entry.path, { recursive: true, mode: 0o700 });
+  if (!(await lstat(entry.path)).isDirectory()) throw new Error("OneDrive mount path must be a directory.");
+  if ((await readdir(entry.path)).length) throw new Error("OneDrive mount directory must be empty.");
+  await run(["rclone", "mount", entry.remote, entry.path, "--read-only", "--devname", entry.remote, "--daemon", "--daemon-wait", "15s"], { env });
+}
+async function workstationStatus(details: boolean): Promise<void> {
+  const current = await settings();
+  const drives = driveStatus(current, await secretEnvironment("drive", current));
+  const config = await exists(conf) ? await privateConfigBytes() : undefined;
+  const saved = await read(backupStamp);
+  const result = {
+    mounted: drives.filter(drive => drive.state === "mounted").length,
+    total: drives.length,
+    ai: current.localAI.kind === "off" ? "off" : await ollamaOnline() ? "online" : "offline",
+    backup: config === undefined ? "unavailable" : digest(config) === saved ? "current" : "due",
+    ...(details ? {
+      model: current.localAI.kind === "ollama" ? current.localAI.model : null,
+      drives: drives.map(({ id, label, state }) => ({ id, label, state })),
+    } : {}),
+  };
+  print(result, true);
+}
+async function signInHints(): Promise<void> {
+  const current = await settings();
+  const hints = current.accounts.map(account => {
+    const name = account.kind === "spotify" ? "Spotify" : everyday[account.kind].name;
+    if (account.kind === "whatsapp") return `${name}: ${account.phone}`;
+    const detail = account.kind === "cloudflare" ? account.account : account.kind === "unifi" ? account.site : undefined;
+    return `${name}: ${account.username}${detail ? ` · ${detail}` : ""}`;
+  });
+  hints.push(`Personal OneDrive: ${current.personalOneDrive.username}`);
+  for (const tenant of current.work)
+    if (tenant.username) hints.push(`${tenant.label}: ${tenant.username}`);
+  print(hints, false);
+}
+
 async function plan(features: Features): Promise<Step[]> {
   if (!available("omarchy")) throw new Error("Run setup on Omarchy with omarchy on PATH.");
   const current = await exists(conf) ? await settings() : initialConfig(features);
   validateConfig(current);
   const steps: Step[] = [];
+  if (!available("code")) steps.push({ kind: "editor" });
   async function file(path: string, content: string, options: { executable?: boolean; private?: boolean } = {}) {
     const mode = await exists(path) ? await lstat(path) : undefined;
     if (mode && !mode.isFile()) throw new Error(`Expected a regular file at ${path}`);
@@ -595,7 +891,7 @@ async function plan(features: Features): Promise<Step[]> {
     throw new Error(`Expected the workstation checkout at ${checkout}. Choose another --workspaces-root if this path is in use.`);
 
 
-  if (features.posh || current.prompt.kind === "posh") {
+  if (current.prompt.kind === "posh") {
     const source = await read(join(import.meta.dir, "snshah.omp.json")) ??
       await read(join(checkout, "snshah.omp.json")) ?? await read(theme);
     if (source === undefined) throw new Error("Run setup from the workstation checkout to install the Oh My Posh theme.");
@@ -618,15 +914,22 @@ async function plan(features: Features): Promise<Step[]> {
     "-- <<< snshah workstation <<<",
   ];
   await file(bindings, upsertBlock(await read(bindings) ?? "", bindingBlock[0], bindingBlock[2], bindingBlock.join("\n")));
-  if ((current.work.length || features.defaultEdge || current.browser.kind === "edge-default") && !available("microsoft-edge-stable"))
+  if ((current.work.length || current.browser.kind === "edge-default") && !available("microsoft-edge-stable"))
     steps.push({ kind: "command", id: "install-edge", argv: ["omarchy", "install", "browser", "edge"] });
-  if ((features.defaultEdge || current.browser.kind === "edge-default") && capture(["xdg-settings", "get", "default-web-browser"], { ...process.env, XDG_CURRENT_DESKTOP: "" }) !== "microsoft-edge.desktop")
+  if (current.browser.kind === "edge-default" && capture(["xdg-settings", "get", "default-web-browser"], { ...process.env, XDG_CURRENT_DESKTOP: "" }) !== "microsoft-edge.desktop")
     steps.push({ kind: "command", id: "default-browser", argv: ["omarchy", "default", "browser", "edge"] });
   for (const [executable, pkg] of [["age", "age"], ["gum", "gum"], ["herdr", "herdr"]] as const) {
     if (!available(executable)) steps.push({ kind: "command", id: `install-${pkg}`, argv: ["omarchy", "pkg", "add", pkg] });
   }
   const apps = join(data, "applications");
   if (data !== join(home, ".local/share")) throw new Error("Omarchy web app installation requires the default XDG_DATA_HOME.");
+  for (const id of everydayIds) {
+    const app = everyday[id];
+    if (!await enabledLauncher(app.entries))
+      steps.push({ kind: "command", id: `webapp-${id}`, argv: ["omarchy", "webapp", "install", app.name, app.url, app.icon, "", ""] });
+  }
+  if (!available("spotify") && !await enabledLauncher(["Spotify", "spotify", "com.spotify.Client"]))
+    steps.push({ kind: "command", id: "install-spotify", argv: ["omarchy", "install", "service", "spotify"] });
   for (const app of appEntries(current.work)) {
     const command = `snshah ${app.args}`;
     const desktop = await read(join(apps, `${app.name}.desktop`));
@@ -648,9 +951,14 @@ async function plan(features: Features): Promise<Step[]> {
     }
   }
 
-  if (features.sync || current.work.some(tenant => tenant.files.kind === "rclone")) {
-    if (!available("rclone")) steps.push({ kind: "command", id: "install-rclone", argv: ["omarchy", "pkg", "add", "rclone", "fuse3"] });
-    else if (!available("fusermount3")) steps.push({ kind: "command", id: "install-fuse3", argv: ["omarchy", "pkg", "add", "fuse3"] });
+  const storagePackages = [!available("rclone") && "rclone", !available("fusermount3") && "fuse3"]
+    .filter((pkg): pkg is string => typeof pkg === "string");
+  if (storagePackages.length)
+    steps.push({ kind: "command", id: "install-onedrive-tools", argv: ["omarchy", "pkg", "add", ...storagePackages] });
+  for (const drive of driveStatus(current, await secretEnvironment("drive", current))) {
+    if (drive.state === "mounted" || drive.state === "occupied") continue;
+    if (!await exists(drive.path)) steps.push({ kind: "directory", path: drive.path });
+    if (drive.state === "configured") steps.push({ kind: "mount", id: drive.id, path: drive.path, remote: drive.remote });
   }
   if (features.local || current.localAI.kind === "ollama") {
     const model = current.localAI.kind === "ollama" ? current.localAI.model : defaultModel;
@@ -689,9 +997,28 @@ async function apply(features: Features, json: boolean): Promise<void> {
   }
   try {
     const steps = await plan(features);
+    const deferred = new Set<Step>();
     for (const step of steps) {
       if (!json) console.log(stepLabel(step));
       switch (step.kind) {
+        case "editor":
+          await run(["omarchy", "install", "editor", "vscode"], { quiet: json });
+          if (!available("code")) throw new Error("The Omarchy VS Code installer finished but code is unavailable.");
+          break;
+        case "directory": await mkdir(step.path, { recursive: true, mode: 0o700 }); break;
+        case "mount": {
+          const current = await settings();
+          const env = await secretEnvironment("drive", current);
+          const drive = driveStatus(current, env).find(candidate => candidate.id === step.id);
+          if (!drive || drive.path !== step.path || drive.remote !== step.remote)
+            throw new Error("OneDrive configuration changed while applying.");
+          try { await mountDrive(drive, env); }
+          catch {
+            deferred.add(step);
+            console.error(`OneDrive profile ${drive.id} could not mount. Check its sign-in and mount directory.`);
+          }
+          break;
+        }
         case "file": await atomicFile(step.path, step.content, step.private ? 0o600 : step.executable ? 0o755 : undefined); break;
         case "command": await run(step.argv, { quiet: json }); break;
         case "wait": await waitForOllama(); break;
@@ -701,8 +1028,12 @@ async function apply(features: Features, json: boolean): Promise<void> {
           break;
       }
     }
-    if (json) print({ completed: describe(steps) }, true);
-    else console.log(steps.length ? `${product} setup complete.` : "No changes needed.");
+    if (json) print({
+      completed: describe(steps.filter(step => !deferred.has(step))),
+      ...(deferred.size ? { deferred: describe([...deferred]) } : {}),
+    }, true);
+    else console.log(deferred.size ? `${product} setup complete with OneDrive mounts pending.` :
+      steps.length ? `${product} setup complete.` : "No changes needed.");
   } finally { await rm(lock, { recursive: true, force: true }); }
 }
 
@@ -719,6 +1050,9 @@ function stepLabel(step: Step): string {
   switch (step.kind) {
     case "command": return step.argv.join(" ");
     case "wait": return `Wait for ${step.service}`;
+    case "editor": return "omarchy install editor vscode";
+    case "mount": return `Mount OneDrive for ${step.id}`;
+    case "directory": return "Prepare OneDrive mount directory";
     case "file":
     case "checkout":
     case "remove": return `${step.kind}: ${step.path}`;
@@ -726,7 +1060,11 @@ function stepLabel(step: Step): string {
 }
 
 function describe(steps: Step[]): Array<{ kind: string; target: string }> {
-  return steps.map(step => ({ kind: step.kind, target: step.kind === "command" ? step.id : step.kind === "wait" ? step.service : step.path }));
+  return steps.map(step => ({
+    kind: step.kind, target: step.kind === "command" || step.kind === "mount" ? step.id
+      : step.kind === "wait" ? step.service : step.kind === "editor" ? "install-vscode"
+      : step.kind === "directory" ? "onedrive-mount-directory" : step.path,
+  }));
 }
 
 async function doctor(json: boolean): Promise<void> {
@@ -753,7 +1091,19 @@ async function browser(url: string, id: string, app: boolean): Promise<void> {
 
 async function openApp(app: PersonalApp): Promise<void> {
   switch (app) {
-    case "gmail": launch(["omarchy-launch-webapp", "https://mail.google.com/"]); return;
+    case "gmail": case "voice": case "cloudflare": case "unifi": case "whatsapp": case "discord": {
+      const entry = await enabledLauncher(everyday[app].entries);
+      if (entry && available("gtk-launch")) launch(["gtk-launch", entry]);
+      else launch(["omarchy-launch-webapp", everyday[app].url]);
+      return;
+    }
+    case "spotify": {
+      const entry = await enabledLauncher(["Spotify", "spotify", "com.spotify.Client"]);
+      if (entry && available("gtk-launch")) launch(["gtk-launch", entry]);
+      else launch(["omarchy-launch-spotify"]);
+      return;
+    }
+    case "hints": await signInHints(); return;
     case "dot": launch(["omarchy-launch-webapp", "https://chatgpt.com/dots"]); return;
     case "herdr":
       if (available("herdr-app")) launch(["herdr-app"]);
@@ -763,6 +1113,8 @@ async function openApp(app: PersonalApp): Promise<void> {
       const current = await settings();
       const actions = new Map<string, Command>([
         [`Gmail · ${current.personal}`, { kind: "open", app: "gmail" }],
+        ...everydayIds.filter(id => id !== "gmail").map((id): [string, Command] => [everyday[id].name, { kind: "open", app: id }]),
+        ["Spotify", { kind: "open", app: "spotify" }],
         ["ChatGPT Dot", { kind: "open", app: "dot" }],
         ["Herdr", { kind: "open", app: "herdr" }],
       ]);
@@ -799,19 +1151,26 @@ async function runAgent(agent: Agent, directory: string): Promise<void> {
   process.exitCode = await child.exited;
 }
 
-async function drive(action: "list" | "mount", id: string): Promise<void> {
-  const tenant = tenantById(await settings(), id);
-  const { files } = tenant;
-  if (files.kind !== "rclone") throw new Error("Set this profile's files.kind to rclone in the workstation config.");
-  const remote = `${files.remote}:`;
-  const env = await secretEnvironment("drive");
-  if (action === "list") {
-    await run(["rclone", "lsf", remote], { env });
-    return;
+async function drive(action: "list" | "mount" | "connect" | "folder", id: string): Promise<void> {
+  const current = await settings();
+  if (id !== "personal") tenantById(current, id);
+  const env = await secretEnvironment("drive", current);
+  const entry = driveStatus(current, env).find(candidate => candidate.id === id);
+  if (!entry) throw new Error("Set the tenant’s files.kind to rclone before using its mount.");
+  switch (action) {
+    case "connect":
+      console.log(`Create or reconnect the OneDrive remote named ${entry.remote.slice(0, -1)}, then run snshah drive mount ${id}.`);
+      await run(["rclone", "config"], { env });
+      return;
+    case "folder":
+      if (entry.state !== "mounted") throw new Error("Mount this OneDrive account before opening its folder.");
+      launch(["xdg-open", entry.path]);
+      return;
+    case "mount": await mountDrive(entry, env); return;
+    case "list":
+      if (entry.state === "needs-sign-in") throw new Error("Connect this OneDrive account before listing files.");
+      await run(["rclone", "lsf", entry.remote], { env });
   }
-  const mount = join(home, "OneDrive", tenant.id);
-  await mkdir(mount, { recursive: true, mode: 0o700 });
-  await run(["rclone", "mount", remote, mount, "--read-only"], { env });
 }
 
 const vaultStaging = join(home, "OneDrive/Vault-Staging");
@@ -888,30 +1247,40 @@ async function restore(command: Extract<Command, { kind: "restore" | "verify" }>
 
 type MenuArgs =
   | [kind: "help" | "plan" | "apply" | "doctor" | "workspace" | "context" | "shell" | "menu"]
-  | ["plan" | "apply" | "doctor", "--json"] | ["test", ...[] | ["--published"]]
+  | ["plan" | "apply" | "doctor", "--json"] | ["status", "--details"] | ["test", ...[] | ["--published"]]
   | ["open", PersonalApp] | ["open", string, WorkApp]
-  | ["agent", Agent] | ["drive", "list" | "mount", string]
+  | ["agent", Agent] | ["drive", "list" | "mount" | "connect" | "folder", string]
   | ["config", "edit" | "check" | "setup" | "set-secret"]
   | ["vault", "status" | "backup" | "verify" | "restore"]
   | ["plugin", "install" | "remove" | "toggle"];
 type MenuAction = { id: string; label: string; args: MenuArgs; terminal?: true };
 type MenuSection = { id: string; label: string; actions: MenuAction[] };
 
+function driveActions(id: string): MenuAction[] {
+  return [
+    { id: "folder", label: "Open mounted folder", args: ["drive", "folder", id] },
+    { id: "list", label: "List OneDrive files", args: ["drive", "list", id], terminal: true },
+    { id: "mount", label: "Mount OneDrive read-only", args: ["drive", "mount", id], terminal: true },
+    { id: "connect", label: "Connect OneDrive", args: ["drive", "connect", id], terminal: true },
+  ];
+}
 function menuSections(work: readonly Tenant[]): MenuSection[] {
   return [
     { id: "open", label: "Open", actions: [
-      { id: "gmail", label: "Personal mail", args: ["open", "gmail"] },
+      ...everydayIds.map((app): MenuAction => ({ id: app, label: everyday[app].name, args: ["open", app] })),
+      { id: "spotify", label: "Spotify", args: ["open", "spotify"] },
+      { id: "hints", label: "Show private sign-in hints", args: ["open", "hints"], terminal: true },
       { id: "dot", label: "ChatGPT Dot", args: ["open", "dot"] },
       { id: "herdr", label: "Herdr", args: ["open", "herdr"] },
       { id: "chooser", label: "Accounts by name", args: ["open", "menu"] },
     ] },
-    ...work.map(({ id }, index): MenuSection => ({ id: `tenant-${id}`, label: `Tenant ${index + 1}`, actions: [
+    { id: "drive", label: "Personal OneDrive", actions: driveActions("personal") },
+    ...work.map(({ id, files }, index): MenuSection => ({ id: `tenant-${id}`, label: `Tenant ${index + 1}`, actions: [
       ...workApps.map((app): MenuAction => ({
         id: app, label: { browser: "Edge browser", outlook: "Outlook", calendar: "Calendar", teams: "Teams", onedrive: "OneDrive on the web" }[app],
         args: ["open", id, app],
       })),
-      { id: "list", label: "List OneDrive files", args: ["drive", "list", id], terminal: true },
-      { id: "mount", label: "Mount OneDrive read-only", args: ["drive", "mount", id], terminal: true },
+      ...(files.kind === "rclone" ? driveActions(id) : []),
     ] })),
     { id: "agents", label: "Agents", actions: [
       ...agents.map((agent): MenuAction => ({ id: agent, label: { claude: "Claude Code", codex: "Codex", local: "Local OpenCode" }[agent],
@@ -930,6 +1299,7 @@ function menuSections(work: readonly Tenant[]): MenuSection[] {
       { id: "apply", label: "Apply changes", args: ["apply"], terminal: true },
       { id: "applyjson", label: "Apply changes (JSON)", args: ["apply", "--json"], terminal: true },
       { id: "doctor", label: "Diagnostics", args: ["doctor"], terminal: true },
+      { id: "status", label: "Workstation status", args: ["status", "--details"], terminal: true },
       { id: "json", label: "Diagnostics (JSON)", args: ["doctor", "--json"], terminal: true },
       { id: "workspace", label: "Workspace path", args: ["workspace"], terminal: true },
       { id: "context", label: "Shell context", args: ["context"], terminal: true },
@@ -1038,7 +1408,7 @@ async function plugin(action: "install" | "remove" | "toggle"): Promise<void> {
       await run(["omarchy", "plugin", "validate", pluginDir]);
       await atomicFile(menuPath, await menuContent((await settings()).work));
       await run(["omarchy-shell", "shell", "rescanPlugins"]);
-      await run(["omarchy", "plugin", "enable", pluginId]);
+      await run(["omarchy", "plugin", "enable", pluginId, "--section", "right"]);
       return;
     case "remove":
       if (await exists(pluginDir)) await run(["omarchy", "plugin", "remove", pluginId, "--yes"]);
@@ -1058,6 +1428,7 @@ async function execute(command: Command): Promise<void> {
       console.log(process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX || process.env.CLAUDECODE || process.env.OPENCODE ? "AGENT" :
         process.env.HERDR_PANE_ID || process.env.HERDR_SESSION_ID || process.env.HERDR ? "HERDR" : "HUMAN");
       return;
+    case "status": await workstationStatus(command.details); return;
     case "doctor": await doctor(command.json); return;
     case "open": await openApp(command.app); return;
     case "work": await browser(urls[command.app], command.tenant, command.app !== "browser"); return;
@@ -1112,6 +1483,10 @@ async function selfTest(published: boolean): Promise<void> {
     await mkdir(join(fixture, ".config/opencode"));
     await mkdir(desktop, { recursive: true });
     await symlink(process.execPath, join(tools, "bun"));
+    for (const command of ["bash", "curl", "tar", "dirname", "mktemp", "rm", "cat", "sleep", "jq", "find", "id", "gzip", "omarchy-plugin-validate"]) {
+      const path = Bun.which(command);
+      if (path) await symlink(path, join(tools, command));
+    }
     const bashrc = 'alias gs="git status"\nexport USER_SETTING=kept\n';
     const agentConfig = '{"userSetting":true}\n';
     const bindings = "-- User bindings\n";
@@ -1121,13 +1496,30 @@ async function selfTest(published: boolean): Promise<void> {
     await writeFile(join(hypr, "hyprland.lua"), "");
     await writeFile(join(hypr, "bindings.lua"), bindings);
     await writeFile(join(tools, "omarchy"), `#!/usr/bin/env bun
-import { mkdirSync, writeFileSync } from "node:fs";
-const [, , group, action, name, , , exec] = Bun.argv;
-if (group === "version") console.log("4.5.0");
-else if (group === "webapp" && action === "install") {
-  const dir = process.env.HOME + "/.local/share/applications";
+import { appendFileSync, chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+const [, , group, action, name, url, , exec] = Bun.argv;
+const home = process.env.HOME;
+const dir = home + "/.local/share/applications";
+const desktop = (title, command) => {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(dir + "/" + name + ".desktop", "[Desktop Entry]\\nName=" + name + "\\nExec=" + exec + "\\n");
+  writeFileSync(dir + "/" + title + ".desktop", "[Desktop Entry]\\nName=" + title + "\\nExec=" + command + "\\n");
+};
+appendFileSync(home + "/install.auto.log", Bun.argv.slice(2).join(" ") + "\\n");
+if (group === "install" && action === "editor") {
+  const code = process.env.PATH.split(":")[0] + "/code";
+  writeFileSync(code, "#!/bin/sh\\nexit 0\\n");
+  chmodSync(code, 0o755);
+} else if (group === "pkg" && action === "aur" && name === "add" && url === "oh-my-posh-bin") {
+  const executable = process.env.PATH.split(":")[0] + "/oh-my-posh";
+  writeFileSync(executable, "#!/bin/sh\\nexit 0\\n");
+  chmodSync(executable, 0o755);
+} else if (group === "default" && action === "browser" && name === "edge") {
+  writeFileSync(home + "/browser-default.auto.state", "microsoft-edge.desktop");
+} else if (group === "install" && action === "service" && name === "spotify") {
+  desktop("Spotify", "omarchy-launch-webapp https://open.spotify.com/");
+} else if (group === "version") console.log("4.5.0");
+else if (group === "webapp" && action === "install") {
+  desktop(name, exec || "omarchy-launch-webapp " + url);
 } else if (group === "plugin" && action === "validate") {
   const manifest = await Bun.file(name + "/manifest.json").json();
   if (manifest.id !== "shah.workstation" || !await Bun.file(name + "/" + manifest.entryPoints.barWidget).exists())
@@ -1136,6 +1528,8 @@ else if (group === "webapp" && action === "install") {
     process.exitCode = Bun.spawnSync(["omarchy-plugin-validate", name], { stderr: "inherit" }).exitCode ?? 1;
 } else if (group === "plugin" && action === "enable" && name === "shah.workstation") {
   // No live shell in the fixture.
+} else if (group === "plugin" && action === "remove" && name === "shah.workstation") {
+  rmSync(home + "/.config/omarchy/plugins/" + name, { recursive: true });
 } else process.exitCode = 9;
 `, { mode: 0o755 });
     const git = Bun.which("git");
@@ -1147,11 +1541,18 @@ if (argv[0] === "clone") mkdirSync(argv.at(-1) + "/.git", { recursive: true });
 else if (argv[0] === "-C" && argv[2] === "remote") console.log("https://github.com/shah/workstation.git");
 else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdout: "inherit", stderr: "inherit" }).exitCode ?? 1;
 `, { mode: 0o755 });
-    for (const tool of ["gum", "herdr", "oh-my-posh", "omarchy-shell"])
+    for (const tool of ["gum", "herdr", "omarchy-shell", "fusermount3"])
       await writeFile(join(tools, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     await writeFile(join(tools, "age"), '#!/bin/sh\nif [ "$1" = "-d" ]; then cat "$3"; else cat > "$3"; fi\n', { mode: 0o755 });
     await writeFile(join(tools, "microsoft-edge-stable"), '#!/bin/sh\nprintf "%s\\n" "$@" >> "$HOME/browser.auto.log"\n', { mode: 0o755 });
-    const env = { HOME: fixture, PATH: `${tools}:${join(fixture, ".local/bin")}:${process.env.PATH}`, TERM: "dumb" };
+    await writeFile(join(tools, "xdg-settings"), '#!/bin/sh\ncat "$HOME/browser-default.auto.state" 2>/dev/null\n', { mode: 0o755 });
+    await writeFile(join(tools, "rclone"),
+      '#!/bin/sh\ncase "$1" in listremotes) if test -f "$HOME/remote.auto.state"; then cat "$HOME/remote.auto.state"; fi;; mount) printf "%s fuse.rclone\\n" "$2" > "$3/mount.auto.state";; esac\n',
+      { mode: 0o755 });
+    await writeFile(join(tools, "findmnt"), '#!/bin/sh\ncat "$5/mount.auto.state" 2>/dev/null\n', { mode: 0o755 });
+    await writeFile(join(desktop, "Discord.desktop"), "[Desktop Entry]\nName=Discord\nExec=discord\n");
+    await writeFile(join(desktop, "WhatsApp.desktop"), "[Desktop Entry]\nHidden=true\nExec=omarchy-launch-webapp https://web.whatsapp.com/\n");
+    const env = { HOME: fixture, PATH: `${tools}:${join(fixture, ".local/bin")}`, TERM: "dumb", XDG_DATA_DIRS: fixture };
     const invoke = (...argv: string[]) => {
       const result = Bun.spawnSync(argv, { env, cwd: source });
       if (!result.success) throw new Error(`${argv.join(" ")}: ${result.stderr.toString()}`);
@@ -1162,11 +1563,13 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const draft = invoke("bun", import.meta.path, "plan", "--json", ...flags);
     assert.equal(invoke("bun", import.meta.path, "plan", ...flags, "--json"), draft);
     assert(JSON.parse(draft).some((step: { kind: string; target: string }) => step.kind === "checkout" && step.target === checkoutPath(root)));
-    assert(!JSON.parse(draft).some((step: { target: string }) => step.target === "default-browser"));
+    assert.equal(JSON.parse(draft)[0].target, "install-vscode");
+    assert(JSON.parse(draft).some((step: { target: string }) => step.target === "default-browser"));
+    assert(!JSON.parse(draft).some((step: { target: string }) => step.target === "webapp-discord"));
     const bootstrap = published
       ? ["bash", "-o", "pipefail", "-c", 'curl -fsSL https://raw.githubusercontent.com/shah/workstation/main/bootstrap.sh | bash -s -- "$@"', "--", ...flags]
       : ["bash", "bootstrap.sh", ...flags];
-    assert.match(invoke(...bootstrap), /Shahid Shah Workstation setup complete/);
+    assert.match(invoke(...bootstrap), /Shahid's Workstation setup complete/);
     assert.equal(invoke("snshah", "workspace"), checkoutPath(root) + "\n");
     assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     assert.equal(invoke(...bootstrap), "No changes needed.\n");
@@ -1177,7 +1580,13 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert.equal(await readFile(join(fixture, ".config/opencode/opencode.json"), "utf8"), agentConfig);
     assert((await readFile(join(hypr, "bindings.lua"), "utf8")).startsWith(bindings));
     assert(await exists(join(hypr, "snshah.auto.lua")));
-    assert(await exists(join(desktop, "Shahid Shah Workstation Gmail.desktop")));
+    for (const name of ["Gmail", "Google Voice", "Cloudflare Admin", "UniFi Admin", "WhatsApp", "Spotify"])
+      assert(await exists(join(desktop, name + ".desktop")));
+    const installation = await readFile(join(fixture, "install.auto.log"), "utf8");
+    assert.equal(installation.match(/install editor vscode/g)?.length, 1);
+    assert.equal(installation.match(/install service spotify/g)?.length, 1);
+    assert.equal(installation.match(/pkg aur add oh-my-posh-bin/g)?.length, 1);
+    assert(!installation.includes("webapp install Discord"));
     assert.match(invoke("bash", "--noprofile", "-ic", "alias ll; alias gs; type mkcd"), /alias ll='ls -al'\nalias gs='git status'/);
     assert.equal(invoke("bash", "--noprofile", "-c", 'source "$HOME/.bashrc"; alias ll 2>/dev/null || true'), "");
     const fixtureConf = join(fixture, ".config/snshah.conf.ts");
@@ -1185,6 +1594,23 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const settings = await interpretConfig(freshConfig);
     const menuFile = join(fixture, ".config/omarchy/extensions/omarchy-menu.jsonc");
     assert.deepEqual(settings.work, []);
+    assert.equal(settings.prompt.kind, "posh");
+    assert.equal(settings.browser.kind, "edge-default");
+    const hints: WorkstationConfig = { ...settings, accounts: [{ kind: "gmail", username: "fixture@example.invalid" }] };
+    await writeFile(fixtureConf, configSource(hints));
+    assert.match(invoke("snshah", "open", "hints"), /fixture@example.invalid/);
+    assert(!invoke("snshah", "status", "--details").includes("fixture@example.invalid"));
+    await writeFile(fixtureConf, freshConfig);
+    const personalMount = join(fixture, "OneDrive", settings.personalOneDrive.username);
+    assert(await exists(personalMount));
+    const offline = JSON.parse(invoke("snshah", "status", "--details"));
+    assert.equal(offline.drives[0].state, "needs-sign-in");
+    assert(!invoke("snshah", "status").includes(settings.personalOneDrive.username));
+    await writeFile(join(fixture, "remote.auto.state"), "snshah-personal:\n");
+    // Simulate a successful mount and verify that the next apply reuses it.
+    invoke("snshah", "apply");
+    assert.equal(JSON.parse(invoke("snshah", "status")).mounted, 1);
+    assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     assert(!(await readFile(menuFile, "utf8")).includes("Tenant 1"));
     const work: Tenant[] = ["studio", "research", "consulting", "operations"].map(id => ({
       id, label: `Fixture ${id}`, files: { kind: "web" },
@@ -1196,12 +1622,14 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     invoke("snshah", "apply");
     assert((await readFile(menuFile, "utf8")).includes("Tenant 1"));
     assert(!(await readFile(menuFile, "utf8")).includes("Tenant 2"));
-    for (const id of ["missing", "../studio", "personal"]) {
+    for (const id of ["missing", "../studio"]) {
       assert.equal(Bun.spawnSync(["snshah", "open", id, "outlook"], { env }).exitCode, 2);
       assert.equal(Bun.spawnSync(["snshah", "drive", "list", id], { env }).exitCode, 2);
     }
     await configureTenants([work[0], { ...work[1], id: work[0].id }]);
     assert.match(Bun.spawnSync(["snshah", "plan"], { env }).stderr.toString(), /Duplicate tenant ID/);
+    await configureTenants([{ ...work[0], files: { kind: "rclone", username: settings.personalOneDrive.username, remote: "fixture" } }]);
+    assert.match(Bun.spawnSync(["snshah", "config", "check"], { env }).stderr.toString(), /same mount username/);
     await configureTenants(work);
     invoke("snshah", "apply");
     assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
@@ -1237,6 +1665,8 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const generatedPlugin = join(fixture, ".config/omarchy/plugins/shah.workstation");
     assert(await exists(join(generatedPlugin, "manifest.json")));
     assert(await exists(join(generatedPlugin, "Panel.auto.qml")));
+    invoke("snshah", "plugin", "remove");
+    assert(!await exists(generatedPlugin));
     assert.equal((await stat(fixtureConf)).mode & 0o777, 0o600);
     const baseline = await readFile(fixtureConf, "utf8");
     const fake = "fixture-only-token";
@@ -1310,9 +1740,9 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     await mkdir(join(fresh, ".config/hypr"), { recursive: true });
     await writeFile(join(fresh, ".config/hypr/hyprland.lua"), "");
     env.HOME = fresh;
-    assert.match(invoke("bun", import.meta.path, "apply"), /Shahid Shah Workstation setup complete/);
+    assert.match(invoke("bun", import.meta.path, "apply"), /Shahid's Workstation setup complete/);
     assert(await exists(checkoutPath(join(fresh, "Work"))));
-    assert(!await exists(join(fresh, ".config/oh-my-posh/snshah.auto.omp.json")));
+    assert(await exists(join(fresh, ".config/oh-my-posh/snshah.auto.omp.json")));
     const freshBin = join(fresh, ".local/bin/snshah");
     assert.equal(invoke(freshBin, "plan", "--json"), "[]\n");
     console.log("Workstation self-test passed.");

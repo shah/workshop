@@ -1,8 +1,10 @@
-# Shahid Shah Workstation
+# Shahid's Workstation
 
 A keyboard-first Omarchy Quattro profile for personal mail, any number of isolated Microsoft 365 tenants, OneDrive, ChatGPT Dot, and engineering agents. Run the same actions from the native Omarchy menu or the `snshah` CLI.
 
-![The workstation submenu with three example tenants configured](docs/menu.png)
+![The workstation status widget in the Omarchy bar](docs/bar.png)
+
+![The workstation submenu with example tenants](docs/menu.png)
 
 ## Install
 
@@ -25,17 +27,35 @@ bun --no-env-file ./snshah.ts apply
 
 For an existing checkout, fetch and review the update before fast-forwarding. The default root is `~/Work`. Set `workspacesRoot` in your private config for a durable change, or pass `--workspaces-root "$HOME/Client Work"` to one `plan` or `apply`. On first installation, that flag seeds the config. `snshah workspace` prints the managed checkout path.
 
+## Fresh-install defaults
+
+Setup checks for existing apps and launchers before using Omarchy's installers. Run `snshah plan` to see what is missing.
+
+| Default | Installation path |
+| --- | --- |
+| Bun | `omarchy pkg add bun`, with `omarchy pkg aur add bun-bin` as fallback, before the CLI runs |
+| VS Code | `omarchy install editor vscode` when `code` is missing |
+| Microsoft Edge | `omarchy install browser edge`, then `omarchy default browser edge` |
+| Oh My Posh | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme |
+| age, gum, Herdr, rclone, FUSE | `omarchy pkg add` when missing |
+| Spotify | `omarchy install service spotify` if a client or web launcher is missing |
+| WhatsApp and Discord | Existing enabled launchers, or Omarchy web apps if missing or hidden |
+| Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`. |
+
+Ollama and local OpenCode are opt-in. Setup creates the personal OneDrive mount directory and mounts an already-configured remote when available. First-time Microsoft sign-in remains interactive.
+
 ## Open the workstation menu
 
-- **Super + Alt + Space → Shahid Shah Workstation** opens the submenu from Omarchy’s root menu.
+- **Super + Alt + Space → Shahid’s Workstation** opens the submenu from Omarchy’s root menu.
 - **Super + Alt + M** or `snshah menu` opens it directly. Check `omarchy menu keybindings --print` if you already use the shortcut.
-- `snshah plugin install` adds an optional Quickshell bar icon for the same menu. `snshah plugin toggle` opens the menu and `snshah plugin remove` removes the bar icon. The native root menu entry stays available. The plugin is bundled here and installed locally.
+- `snshah plugin install` adds the optional **Shahid’s Workstation** status widget to the right side of the native bar. `snshah plugin toggle` opens the workstation menu and `snshah plugin remove` removes the widget. The native root menu entry stays available. The plugin is bundled here and installed locally.
 
-Use the arrow keys and Enter, or type to filter. **Open → Accounts by name** reads private display names at runtime. Each configured tenant gets a submenu, numbered in config order. **Accounts by name** displays the labels from your private config. The generated Omarchy menu file uses generic titles. Agent sessions, mounts, vault passphrases, and secret entry open in an Omarchy terminal. **Setup & Diagnostics → Apply changes** previews the changes and asks for confirmation.
+Use the arrow keys and Enter, or type to filter. Each configured tenant gets a submenu, numbered in config order. **Open → Accounts by name** reads private display names at runtime. The generated Omarchy menu file uses generic titles. Agent sessions, mounts, vault passphrases, and secret entry open in an Omarchy terminal. **Setup & Diagnostics → Apply changes** previews the changes and asks for confirmation.
 
 | Menu | CLI |
 | --- | --- |
-| Open | `snshah open gmail\|dot\|herdr\|menu` |
+| Open | `snshah open gmail`, `snshah open voice`, `snshah open menu`, `snshah open hints` |
+| Personal OneDrive | `snshah drive connect personal`, `snshah drive mount personal`, `snshah drive folder personal` |
 | Tenant submenus | `snshah open studio outlook`, `snshah drive list research`, `snshah drive mount research` |
 | Agents | `snshah agent claude\|codex\|local [directory]` |
 | Configuration | `snshah config setup\|check\|edit`, `snshah config set-secret VARIABLE`, `snshah shell` |
@@ -44,6 +64,14 @@ Use the arrow keys and Enter, or type to filter. **Open → Accounts by name** r
 | Plugin | `snshah plugin install\|toggle\|remove` |
 
 The native menu is generated from the command table embedded in `snshah.ts`. Omarchy’s menu definition has a fixed JSONC path. Edit the TypeScript config for workstation settings.
+
+## Workstation status bar
+
+![The Omarchy workstation panel with example mount states](docs/panel.png)
+
+Click the widget for OneDrive mount status, the local Ollama state and model, agent shortcuts, and **Back up config**. The **Apps and accounts** picker includes your communication apps, cloud admin tools, ChatGPT Dot, and configured work accounts. Right-click the widget to open the full workstation menu. In the panel, use arrows and Enter to choose an action, and Escape to close it.
+
+The bar shows a mount count, local AI state, and a backup-due marker. Hover for the full status. The panel resolves display labels only while open. `snshah status` returns the compact state as JSON. `snshah status --details` includes drive labels and mount states. These checks use local mount and remote registration data, so **Ready to mount** means the remote is configured. An expired Microsoft session may still need reconnection. Omarchy’s native Agents and Media widgets remain available for usage and playback.
 
 ## Configure profiles, preferences, and secrets
 
@@ -65,22 +93,37 @@ Configuration options include:
 | `browser` | `{ kind: "omarchy" }` or `{ kind: "edge-default" }` |
 | `prompt` | `{ kind: "starship" }` or `{ kind: "posh" }` using the bundled theme |
 | `localAI` | `{ kind: "off" }` or `{ kind: "ollama", model: "qwen3-coder:30b" }` |
-| `work[].files` | `{ kind: "web" }` or `{ kind: "rclone", remote: "example-remote" }` |
+| `personalOneDrive` | A `username` and rclone `remote`. The defaults are your Linux login and `snshah-personal`. |
+| `work[].files` | `{ kind: "web" }` or `{ kind: "rclone", username: "example-work", remote: "example-remote" }` |
+| `accounts` | Service-specific sign-in hints. View them via **Open → Show private sign-in hints**. |
 
 In the generated TypeScript file, replace the empty `work` array in `preferences` with entries like these:
 
 ```ts
 work: [
   { id: "studio", label: "Example Studio", files: { kind: "web" } },
-  { id: "research", label: "Example Research", files: { kind: "rclone", remote: "research-files" } },
+  { id: "research", label: "Example Research", files: { kind: "rclone", username: "research-user", remote: "research-files" } },
 ],
 ```
 
-Use the tenant ID in CLI commands. Renaming or reordering an entry leaves its browser directory and mount path intact. After adding or removing entries, run `snshah apply` to update launchers and menu routes. Removing an entry leaves its browser data on disk.
+Use the tenant ID in CLI commands. Labels and order can change without moving browser data. The tenant ID identifies the browser directory, and the mount username identifies the OneDrive folder. After adding or removing entries, run `snshah apply` to update launchers and menu routes. Removing an entry leaves its browser data on disk.
+
+For sign-in hints, set entries in the private `accounts` array. For example:
+
+```ts
+accounts: [
+  { kind: "gmail", username: "sample@example.invalid" },
+  { kind: "whatsapp", phone: "+1 555 0100" },
+  { kind: "cloudflare", username: "operator@example.invalid", account: "Example" },
+  { kind: "unifi", username: "operator@example.invalid", site: "Example Site" },
+],
+```
+
+Google Voice, Spotify, and Discord accept a `username` hint. A work tenant can also declare an optional Microsoft `username` hint. Passwords belong in your browser or password manager. Hints stay in the private TypeScript file until you explicitly display them.
 
 ### Editing in VS Code
 
-Install Visual Studio Code and ensure the `code` command is on your PATH. Always open the private file through **Configuration → Edit in VS Code** or `snshah config edit` to get the dedicated workspace and save notifications. The generated workspace keeps the rest of `~/.config` out of the Explorer. The repo also includes [.vscode defaults](.vscode) for its own checkout.
+Setup installs Visual Studio Code through Omarchy when `code` is missing. Open the private file through **Configuration → Edit in VS Code** or `snshah config edit` to get the dedicated workspace and save notifications. The generated workspace keeps the rest of `~/.config` out of the Explorer. The repo also includes [.vscode defaults](.vscode) for its own checkout.
 
 - Save with **Ctrl+S** to format the file. VS Code’s built-in TypeScript support provides syntax coloring, completion, hover help, and errors for invalid types or tagged choices. Use **Ctrl+Shift+M** to open the Problems panel.
 - Run **Tasks: Run Task → Check workstation config** for runtime checks such as duplicate tenant IDs, invalid secret declarations, and file permissions. VS Code may ask you to trust the local workspace before running the task. The task is started manually.
@@ -109,7 +152,7 @@ Config checks, diagnostics, the menu, and notifications omit token values. Keep 
 
 ## Mail, meetings, and files
 
-Personal Gmail and ChatGPT Dot use your Omarchy default browser. Work slots use separate Edge data directories. Open each full browser once and sign into the matching tenant:
+Personal web apps use Edge through Omarchy’s default browser routing. Set `browser: { kind: "omarchy" }` to stop enforcing Edge if you choose another default in Omarchy. Work slots use separate Edge data directories. Open each full browser once and sign into the matching tenant:
 
 ```bash
 snshah open studio browser
@@ -120,7 +163,9 @@ snshah open research onedrive
 
 Outlook opens the web app in its own window. In Edge, use **Apps → Install this site as an app** if you want an installed PWA. Tenant policy can affect sign-in, device compliance, and app features. [Microsoft Outlook web app guide](https://support.microsoft.com/en-us/outlook/use-the-web-version-of-outlook-like-a-desktop-app)
 
-For a local OneDrive mount, set the tenant’s `files` to `rclone`, run `snshah apply`, then create the named remote with `rclone config`. Verify it with `snshah drive list research` before running `snshah drive mount research`. The mount appears at `~/OneDrive/research`, is read-only, and stops when you press Ctrl+C in its terminal. Use the web app for edits or uploads. [rclone OneDrive setup](https://rclone.org/onedrive/)
+Your personal mount directory defaults to `~/OneDrive/<linux-login>`. Set `personalOneDrive.username` to the folder name you want. Use **Personal OneDrive → Connect OneDrive** or `snshah drive connect personal` to create or reconnect the configured rclone remote. Complete sign-in in the browser, choose the intended OneDrive account, and run `snshah apply` or `snshah drive mount personal`.
+
+For a tenant, choose `files.kind: "rclone"` and provide a distinct `username` and `remote`. Use the same connect and mount commands with the tenant ID. Run `snshah drive list <id>` to verify the remote and `snshah drive folder <id>` to open the mounted folder. Mounts run in the background, read-only, under `~/OneDrive/<username>`. A new login can run `snshah apply` to remount authorized drives. Use the web app for edits or uploads. Unmount with `fusermount3 -u "$HOME/OneDrive/<username>"`. [rclone OneDrive setup](https://rclone.org/onedrive/)
 
 ## Dot, Herdr, and engineering agents
 
@@ -152,4 +197,4 @@ bun --no-env-file ./snshah.ts test --published
 snshah plan --json
 ```
 
-The self-test uses a temporary home, fake tokens, simulated system operations, and a mock age executable. It also checks the generated VS Code workspace, the save reminder, and hidden token entry after formatting. For desktop acceptance, open the native submenu, launch an app, save an edit through VS Code, and exercise real age backup and verify. A second apply with identical settings should report **No changes needed**. Run `hyprctl configerrors` after changing bindings.
+The self-test uses a temporary home, fake tokens, simulated system operations, and a mock age executable. It also checks the generated VS Code workspace, the save reminder, and hidden token entry after formatting. For desktop acceptance, open the native submenu and status widget, try keyboard navigation and a narrow bar, launch an app, save an edit through VS Code, and exercise real Microsoft sign-in, mounting, and age backup and verify. A second apply with identical settings should report **No changes needed**. Run `hyprctl configerrors` after changing bindings.
