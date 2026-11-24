@@ -32,6 +32,18 @@ bun --no-env-file ./snshah.ts apply
 
 The default workspace root is `~/Work`. Set `workspacesRoot` in your private config or pass `--workspaces-root "$HOME/Client Work"` to preview or apply with a different root. On first installation, that flag seeds the config. The generated `repository` setting uses `shah/workshop` as the example. Run `snshah workspace` to print the configured checkout path.
 
+## Update Workshop
+
+Run `snshah --version` to see the installed CLI version. Workshop starts at `v0.1.0` and publishes a new [Semantic Version](https://semver.org/) on each push to `main`.
+
+Run `snshah update` or open **Setup & Diagnostics → Update Workshop**. Workshop resolves GitHub’s `main` to one commit, previews its setup plan, and asks before applying it. The existing CLI is replaced after setup succeeds. The updater does not pull or modify your local Git checkout.
+
+- `snshah update --check` previews the available revision.
+- `snshah update --yes` applies it without the confirmation prompt.
+- If your installed CLI predates the updater, use the bootstrap command above once.
+
+Run `snshah --help` for the full command list and `snshah ssh --help` for a command group. The terminal UI uses emoji and color, respects `NO_COLOR`, and keeps JSON and shell output suitable for scripts. Bun fetches the pinned CLI libraries from the npm registry on first use.
+
 ## Fresh-install defaults
 
 Setup checks for existing apps and launchers before using Omarchy's installers. Run `snshah plan` to see what is missing.
@@ -42,7 +54,7 @@ Setup checks for existing apps and launchers before using Omarchy's installers. 
 | VS Code | `omarchy install editor vscode` when `code` is missing |
 | Microsoft Edge | `omarchy install browser edge`, then `omarchy default browser edge` |
 | Oh My Posh | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme |
-| age, gum, Herdr, rclone, FUSE | `omarchy pkg add` when missing |
+| age, Herdr, rclone, FUSE | `omarchy pkg add` when missing |
 | Spotify | `omarchy install service spotify` if a client or web launcher is missing |
 | WhatsApp and Discord | Existing enabled launchers, or Omarchy web apps if missing or hidden |
 | Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`. |
@@ -173,6 +185,18 @@ For a tenant, choose `files.kind: "rclone"` and provide a distinct `username` an
 
 ## Dot, Herdr, and engineering agents
 
+### Codex and Claude Code defaults
+
+Workshop setup configures both tools for routine engineering work inside the user's sandbox. Agents can inspect and edit project files, build, test, and use local Git without asking for routine permission. Provider sign-in and account access are separate.
+
+| Tool | Defaults added by setup |
+| --- | --- |
+| Codex | Workspace-write sandbox, outbound network access, and approval prompts set to `never` in `$CODEX_HOME/config.toml` (normally `~/.codex/config.toml`). |
+| Claude Code | Automatic file edits and automatic approval of sandboxed shell commands. The sandbox allows GitHub and npm domains and disallows unsandboxed fallback. Workshop installs `bubblewrap` and `socat` if needed. Settings live in `$CLAUDE_CONFIG_DIR/settings.json` (normally `~/.claude/settings.json`). |
+
+Setup fills unset defaults, preserves explicit settings, and adds the same routine-work guidance to the user-level Codex `AGENTS.md` and Claude Code `CLAUDE.md`. Start a new agent session after setup. Managed execution policies still govern the session.
+
+
 - `snshah open dot` opens ChatGPT Dot. Set up app connections in the intended ChatGPT workspace. [OpenAI Dot setup](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)
 - `snshah open herdr` uses Herdr Desktop when installed and falls back to native Herdr in a terminal. Use separate worktrees for agents that will edit concurrently.
 - `snshah agent claude /path/to/worktree` and `snshah agent codex /path/to/worktree` use your Omarchy-managed runtimes.
@@ -182,7 +206,7 @@ For a tenant, choose `files.kind: "rclone"` and provide a distinct `username` an
 
 Enrollment uses a short-lived SSH password prompt. The password is a one-time code displayed on the Workshop PC. Ordinary SSH uses the enrolled key.
 
-1. **On the Workshop PC**, install the enrollment dependency once with `omarchy pkg add python-paramiko`. Open **Workshop → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
+1. **On the Workshop PC**, open **Workshop → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. Bun fetches the pinned SSH library on first use. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
 2. **On the new PC**, run the displayed `ssh -p PORT enroll@ADDRESS` command. Compare the fingerprint shown by SSH with the one displayed on the Workshop PC before accepting it, then enter the one-time code. Choose Windows PowerShell, macOS, or Linux / WSL. Follow the displayed commands in a second terminal and paste the single Ed25519 **public key** line into the enrollment session.
 3. **Back on the Workshop PC**, check the pending key fingerprint and enter a device name such as `travel-laptop` to approve it. Press Enter to deny. The enrollment listener closes after the request finishes or the five-minute window expires.
 4. **If regular SSH has not been enabled yet**, run `snshah ssh enable travel-laptop` on the Workshop PC. This delegates to Omarchy’s native setup, which starts key-only OpenSSH and opens port 22 under Omarchy’s standard firewall policy. The command also prints the regular server fingerprints. For an existing SSH server, make sure it uses your account’s `~/.ssh/authorized_keys` and check its effective firewall and authentication settings.

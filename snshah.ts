@@ -1,8 +1,12 @@
 #!/usr/bin/env -S bun --no-env-file
 import assert from "node:assert/strict";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createServer, isIPv4, type AddressInfo, type Socket } from "node:net";
+import { createInterface } from "node:readline/promises";
+import type { Duplex } from "node:stream";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { homedir, userInfo, hostname, tmpdir } from "node:os";
+import { access, chmod, lstat, mkdir, mkdtemp, open as openFile, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { homedir, userInfo, hostname, networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 type OneDriveProfile = { username: string; remote: string };
@@ -25,7 +29,8 @@ const agents = ["claude", "codex", "local"] as const;
 type Agent = typeof agents[number];
 type Features = { local: boolean; workspaceRoot?: string };
 type Command =
-  | { kind: "help" | "context" }
+  | { kind: "context" }
+  | { kind: "update"; check: boolean; yes: boolean }
   | { kind: "workspace"; root?: string }
   | { kind: "test"; published: boolean }
   | { kind: "plan" | "apply"; json: boolean; features: Features }
@@ -47,6 +52,7 @@ type Command =
 
 type Step =
   | { kind: "file"; path: string; content: string; executable?: boolean; private?: boolean }
+  | { kind: "agent-config"; path: string; content: string; previous?: string }
   | { kind: "command"; id: string; argv: string[] }
   | { kind: "wait"; service: "ollama" }
   | { kind: "checkout"; path: string; repository: string }
@@ -61,8 +67,8 @@ const data = process.env.XDG_DATA_HOME || join(home, ".local/share");
 const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
-const sshEnrollment = join(assetDir, "ssh-enrollment.auto.py");
 const product = "Workshop";
+const cliVersion = "0.1.0";
 const defaultRepository = "shah/workshop";
 const defaultWorkspaceRoot = join(home, "Work");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
@@ -280,83 +286,148 @@ const addedAliases = {
 } as const;
 
 class UsageError extends Error {}
-const usage = `Usage: snshah <command>
 
-  plan|apply [--workspaces-root PATH] [--local-ai] [--json]
-  workspace [--workspaces-root PATH]
-  test [--published]
-  doctor [--json]
-  ssh enroll|devices|revoke [device]
-  ssh enable DEVICE
-  shell [bash|zsh]
-  open gmail|voice|cloudflare|unifi|whatsapp|discord|spotify|dot|herdr|menu|hints
-  open TENANT [browser|outlook|calendar|teams|onedrive]
-  agent claude|codex|local [directory]
-  drive list|mount|connect|folder PERSONAL_OR_TENANT
-  status [--details]
-  vault status|backup|verify|restore [archive] [--overwrite]
-  config setup|check|edit|set-secret [VARIABLE]
-  menu
-  context
-  plugin install|remove|toggle`;
+const commanderDependency = "commander@12.1.0";
+const chalkDependency = "chalk@5.6.2";
+const clackDependency = "@clack/prompts@0.11.0";
+const interactiveOutput = !!process.stdout.isTTY && process.env.TERM !== "dumb";
+let chalk: typeof import("chalk").default | undefined;
 
 function member<const T extends readonly string[]>(choices: T, value: string | undefined): value is T[number] {
   return value !== undefined && choices.some(choice => choice === value);
 }
 
-function parse(argv: string[]): Command {
-  const [kind, first, second, ...rest] = argv;
-  if (!kind || member(["help", "-h", "--help"], kind) && !first) return { kind: "help" };
-  if (kind === "plan" || kind === "apply" || kind === "workspace") {
-    const flags = new Set<string>();
-    let root: string | undefined;
-    for (let i = 1; i < argv.length; i++) {
-      const flag = argv[i];
-      if (flags.has(flag)) throw new UsageError(`Duplicate option: ${flag}`);
-      flags.add(flag);
-      if (flag === "--workspaces-root") {
-        const path = argv[++i];
-        if (!path || path.startsWith("--")) throw new UsageError("--workspaces-root requires a path.");
-        root = resolve(path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
-      } else if (kind === "workspace" || !member(["--local-ai", "--json"], flag)) {
-        throw new UsageError(`Unknown option: ${flag}`);
-      }
-    }
-    if (kind === "workspace") return { kind, root };
-    return { kind, json: flags.has("--json"), features: {
-      local: flags.has("--local-ai"), workspaceRoot: root,
-    } };
+function styled(message: string, style: "action" | "success" | "pending" | "error" = "action"): string {
+  if (!interactiveOutput) return message;
+  const icons = { action: "🛠️", success: "✅", pending: "🟡", error: "❌" };
+  const colors = { action: chalk?.cyan, success: chalk?.green, pending: chalk?.yellow, error: chalk?.red };
+  return `${icons[style]}  ${colors[style]?.(message) ?? message}`;
+}
+
+function say(message: string, style?: Parameters<typeof styled>[1]): void {
+  console.log(styled(message, style));
+}
+
+async function cliPrompts() {
+  return import(clackDependency).catch(() => {
+    throw new Error(`Could not load ${clackDependency}. Check access to the npm registry and retry.`);
+  });
+}
+
+function workspaceOption(path?: string): string | undefined {
+  return path ? resolve(path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path) : undefined;
+}
+
+async function dispatchCli(argv: string[], dispatch: (command: Command) => Promise<void> = execute): Promise<void> {
+  const { Command: Cli, Argument, CommanderError } = await import(commanderDependency).catch(() => {
+    throw new Error(`Could not load ${commanderDependency}. Check access to the npm registry and retry.`);
+  });
+  if (interactiveOutput && !process.env.NO_COLOR && !chalk) chalk = (await import(chalkDependency).catch(() => undefined))?.default;
+  const program = new Cli().name("snshah").version(`v${cliVersion}`).description(interactiveOutput
+    ? chalk?.bold.cyan("🛠️  Shahid’s AI Agents Workshop") ?? "🛠️  Shahid’s AI Agents Workshop"
+    : "Shahid’s AI Agents Workshop");
+  program.exitOverride();
+  program.configureOutput({
+    outputError: (message: string, write: (text: string) => void) => write(styled(message.trimEnd(), "error") + "\n"),
+  });
+  program.action(() => program.outputHelp());
+  program.addHelpText("after", () => interactiveOutput
+    ? `\n${chalk?.bold("🚀  Start here") ?? "🚀  Start here"}\n  snshah plan       Preview setup\n  snshah update     Get the latest Workshop\n  snshah ssh --help See remote access commands\n`
+    : "");
+
+  const description = (icon: string, message: string) =>
+    interactiveOutput ? `${icon}  ${chalk?.cyan(message) ?? message}` : message;
+  const command = (parent: typeof program, name: string, icon: string, message: string) =>
+    parent.command(name).description(description(icon, message));
+  const group = (name: string, icon: string, message: string) => {
+    const parent = command(program, name, icon, message);
+    parent.action(() => parent.outputHelp());
+    return parent;
+  };
+  const oneOf = (name: string, choices: readonly string[], fallback?: string) => {
+    const argument = new Argument(name).choices([...choices]);
+    if (fallback !== undefined) argument.default(fallback);
+    return argument;
+  };
+
+  for (const kind of ["plan", "apply"] as const) {
+    command(program, kind, kind === "plan" ? "🔎" : "🛠️", kind === "plan" ? "Preview setup changes" : "Apply Workshop setup")
+      .option("--workspaces-root <path>", "Root for repository checkouts")
+      .option("--local-ai", "Enable local Ollama setup")
+      .option("--json", "Print structured output")
+      .action((options: { workspacesRoot?: string; localAi?: boolean; json?: boolean }) => dispatch({
+        kind, json: !!options.json, features: { local: !!options.localAi, workspaceRoot: workspaceOption(options.workspacesRoot) },
+      }));
   }
-  if (kind === "ssh" && member(["enroll", "devices", "revoke", "enable"], first) && !rest.length &&
-      (first === "enable" ? !!second : !second || first === "revoke"))
-    return { kind, action: first, device: second };
-  if (kind === "test" && (!first || first === "--published") && !second) return { kind, published: !!first };
-  if (kind === "status" && (!first || first === "--details") && !second) return { kind, details: !!first };
-  if (kind === "doctor" && (!first || first === "--json") && !second) return { kind, json: !!first };
-  if (kind === "shell" && !second && (!first || member(["bash", "zsh"], first))) return { kind, shell: first === "zsh" ? "zsh" : "bash" };
-  if (kind === "context" && !first) return { kind };
-  if (kind === "open" && !second && member(personalApps, first)) return { kind, app: first };
-  if (kind === "open" && !rest.length && validTenantId(first) && (!second || member(workApps, second)))
-    return { kind: "work", tenant: first, app: member(workApps, second) ? second : "outlook" };
-  if (kind === "agent" && !rest.length && member(agents, first))
-    return { kind, agent: first, directory: resolve(second ?? process.cwd()) };
-  if (kind === "drive" && !rest.length && member(["list", "mount", "connect", "folder"], first) && second && (second === "personal" || validTenantId(second)))
-    return { kind, action: first, tenant: second };
-  if (kind === "vault" && !second && member(["status", "backup"], first)) return { kind, action: first };
-  if (kind === "vault" && (first === "restore" || first === "verify")) {
-    const overwrite = argv.at(-1) === "--overwrite";
-    const args = argv.slice(2, overwrite ? -1 : undefined);
-    if (args.length <= 1 && (!overwrite || first === "restore") && !args[0]?.startsWith("--"))
-      return { kind: first, archive: args[0], overwrite };
+  command(program, "update", "📦", "Install the latest published Workshop revision")
+    .option("--check", "Preview the update")
+    .option("--yes", "Apply without prompting")
+    .action((options: { check?: boolean; yes?: boolean }) => dispatch({ kind: "update", check: !!options.check, yes: !!options.yes }));
+  command(program, "workspace", "📁", "Print the configured checkout path")
+    .option("--workspaces-root <path>", "Root for repository checkouts")
+    .action((options: { workspacesRoot?: string }) => dispatch({ kind: "workspace", root: workspaceOption(options.workspacesRoot) }));
+  command(program, "doctor", "🩺", "Inspect Workshop dependencies").option("--json", "Print structured output")
+    .action((options: { json?: boolean }) => dispatch({ kind: "doctor", json: !!options.json }));
+  command(program, "status", "📊", "Print status for the Omarchy widget").option("--details", "Include drive details")
+    .action((options: { details?: boolean }) => dispatch({ kind: "status", details: !!options.details }));
+  command(program, "test", "🧪", "Run the Workshop self-test").option("--published", "Test the published bootstrap")
+    .action((options: { published?: boolean }) => dispatch({ kind: "test", published: !!options.published }));
+  command(program, "context", "🧭", "Print the current shell context").action(() => dispatch({ kind: "context" }));
+  command(program, "shell", "🐚", "Emit shell initialization code").addArgument(oneOf("[shell]", ["bash", "zsh"], "bash"))
+    .action((shell: "bash" | "zsh") => dispatch({ kind: "shell", shell }));
+  command(program, "agent", "🤖", "Start an agent in a directory").addArgument(oneOf("<agent>", agents)).argument("[directory]")
+    .action((agent: Agent, directory?: string) => dispatch({ kind: "agent", agent, directory: resolve(directory ?? process.cwd()) }));
+  command(program, "open", "🚀", "Open an app or tenant").argument("<app-or-tenant>").addArgument(oneOf("[tenant-app]", workApps))
+    .action((target: string, app?: WorkApp) => {
+      if (!app && member(personalApps, target)) return dispatch({ kind: "open", app: target });
+      if (!validTenantId(target)) throw new UsageError("Choose a known app or a valid tenant ID.");
+      return dispatch({ kind: "work", tenant: target, app: app ?? "outlook" });
+    });
+
+  const ssh = group("ssh", "🔑", "Enroll and manage remote devices");
+  command(ssh, "enroll", "➕", "Start a one-time enrollment").action(() => dispatch({ kind: "ssh", action: "enroll" }));
+  command(ssh, "devices", "💻", "List enrolled devices").action(() => dispatch({ kind: "ssh", action: "devices" }));
+  command(ssh, "revoke", "🗑️", "Revoke a device key").argument("[device]")
+    .action((device?: string) => dispatch({ kind: "ssh", action: "revoke", device }));
+  command(ssh, "enable", "🟢", "Enable regular key-only SSH").argument("<device>")
+    .action((device: string) => dispatch({ kind: "ssh", action: "enable", device }));
+
+  const drives = group("drive", "☁️", "Manage OneDrive connections");
+  for (const [action, message] of [["list", "List files"], ["mount", "Mount a remote"], ["connect", "Sign in to OneDrive"], ["folder", "Open the mount folder"]] as const)
+    command(drives, action, "☁️", message).argument("<tenant>")
+      .action((tenant: string) => {
+        if (tenant !== "personal" && !validTenantId(tenant)) throw new UsageError("Choose personal or a valid tenant ID.");
+        return dispatch({ kind: "drive", action, tenant });
+      });
+
+  const vaultCommand = group("vault", "🔐", "Back up and restore configuration");
+  for (const [action, message] of [["status", "Check backup status"], ["backup", "Create an encrypted backup"]] as const)
+    command(vaultCommand, action, "🔐", message).action(() => dispatch({ kind: "vault", action }));
+  command(vaultCommand, "verify", "🔎", "Verify a backup").argument("[archive]")
+    .action((archive?: string) => dispatch({ kind: "verify", archive, overwrite: false }));
+  command(vaultCommand, "restore", "📦", "Restore a backup").argument("[archive]").option("--overwrite", "Replace the existing config")
+    .action((archive: string | undefined, options: { overwrite?: boolean }) => dispatch({ kind: "restore", archive, overwrite: !!options.overwrite }));
+
+  const configCommand = group("config", "⚙️", "Edit and validate Workshop settings");
+  for (const [action, message] of [["setup", "Set profile names"], ["check", "Validate configuration"], ["edit", "Open configuration in the editor"]] as const)
+    command(configCommand, action, "⚙️", message).action(() => dispatch({ kind: "config", action }));
+  command(configCommand, "set-secret", "🔒", "Enter a secret with masked input").argument("<variable>")
+    .action((variable: string) => dispatch({ kind: "set-secret", variable }));
+
+  const plugins = group("plugin", "🧩", "Manage the Omarchy bar widget");
+  for (const [action, message] of [["install", "Install or refresh the widget"], ["remove", "Remove the widget"], ["toggle", "Open the Workshop menu"]] as const)
+    command(plugins, action, "🧩", message).action(() => dispatch({ kind: "plugin", action }));
+
+  const menu = command(program, "menu", "📋", "Open the Workshop menu");
+  menu.action(() => dispatch({ kind: "menu", terminal: false }));
+  menu.command("run", { hidden: true }).argument("<action>").option("--terminal")
+    .action((id: string, options: { terminal?: boolean }) => dispatch({ kind: "menu", id, terminal: !!options.terminal }));
+  program.command("shell-env", { hidden: true }).action(() => dispatch({ kind: "shell-env" }));
+  try { await program.parseAsync(argv, { from: "user" }); }
+  catch (error) {
+    if (!(error instanceof CommanderError)) throw error;
+    if (error.exitCode !== 0) process.exitCode = 2;
   }
-  if (kind === "config" && !second && member(["edit", "check", "setup"], first)) return { kind, action: first };
-  if (kind === "config" && first === "set-secret" && second && !rest.length) return { kind: "set-secret", variable: second };
-  if (kind === "menu" && !first) return { kind, terminal: false };
-  if (kind === "menu" && first === "run" && second && (!rest.length || rest.length === 1 && rest[0] === "--terminal"))
-    return { kind, id: second, terminal: rest.length === 1 };
-  if (kind === "shell-env" && !first) return { kind };
-  if (kind === "plugin" && !second && member(["install", "remove", "toggle"], first)) return { kind, action: first };
-  throw new UsageError(`Invalid arguments.\n${usage}`);
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -369,7 +440,7 @@ async function read(path: string): Promise<string | undefined> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
-async function atomicFile(path: string, content: string, mode?: number): Promise<void> {
+async function atomicFile(path: string, content: string | Uint8Array, mode?: number): Promise<void> {
   const previous = await exists(path) ? await lstat(path) : undefined;
   if (previous && !previous.isFile()) throw new Error(`Expected a regular file at ${path}`);
   await mkdir(dirname(path), { recursive: true });
@@ -401,8 +472,8 @@ function launch(argv: string[], cwd?: string): void {
 
 function print(value: unknown, json: boolean): void {
   if (json) console.log(JSON.stringify(value, null, 2));
-  else if (Array.isArray(value)) for (const item of value) console.log(item);
-  else console.log(value);
+  else if (Array.isArray(value)) for (const item of value) say(String(item));
+  else say(String(value));
 }
 
 async function shellCode(shell: "bash" | "zsh"): Promise<string> {
@@ -705,11 +776,11 @@ async function secretEnvironment(scope: Scope, config?: WorkstationConfig): Prom
 }
 
 async function promptInput(title: string, hidden = false): Promise<string> {
-  const result = Bun.spawn(["gum", "input", "--header", title, ...(hidden ? ["--password"] : [])],
-    { stdin: "inherit", stdout: "pipe", stderr: "inherit" });
-  const value = await new Response(result.stdout).text();
-  if (await result.exited !== 0) throw new Error("Input cancelled.");
-  return value.replace(/\r?\n$/, "");
+  if (!process.stdin.isTTY) throw new Error("Open this prompt in a terminal.");
+  const { text, password, isCancel } = await cliPrompts();
+  const value = await (hidden ? password({ message: `🔒  ${title}` }) : text({ message: `🛠️  ${title}` }));
+  if (isCancel(value)) throw new Error("Input canceled.");
+  return value;
 }
 
 async function notify(message: string, backup = false): Promise<void> {
@@ -747,8 +818,7 @@ async function editConfig(): Promise<void> {
   finally { watcher.close(); clearTimeout(timer); await saved(); }
 }
 
-async function setSecret(variable: string): Promise<void> {
-  const text = await privateConfigBytes();
+async function rotateSecret(text: string, variable: string, readValue: () => Promise<string>): Promise<string> {
   const current = await interpretConfig(text);
   const existing = current.secrets.find(secret => secret.variable === variable);
   if (!existing) throw new Error("Declare this variable and its scope in the config before setting its value.");
@@ -762,11 +832,17 @@ async function setSecret(variable: string): Promise<void> {
   catch { /* A custom expression should be edited directly. */ }
   if (first < 0 || last <= first || !managed)
     throw new Error("The secret declarations were edited as code. Set the value directly in VS Code, or format the marked declarations as generated JSON literals.");
-  const value = await promptInput("New token value", true);
+  const value = await readValue();
   const updated = current.secrets.map(entry => entry.variable === variable ? { ...entry, value } : entry);
   const block = [beginSecrets, `const secrets = ${JSON.stringify(updated, null, 2)} satisfies WorkstationConfig["secrets"];`, endSecrets].join("\n");
   const next = upsertBlock(text, beginSecrets, endSecrets, block);
   await interpretConfig(next);
+  return next;
+}
+
+async function setSecret(variable: string): Promise<void> {
+  const text = await privateConfigBytes();
+  const next = await rotateSecret(text, variable, () => promptInput("New token value", true));
   if (await privateConfigBytes() !== text) throw new Error("The config changed while the prompt was open.");
   await atomicFile(conf, next, 0o600);
   await notify("Secret updated. Back up the Workshop config.", true).catch(() => {});
@@ -865,7 +941,13 @@ async function workstationStatus(details: boolean): Promise<void> {
       drives: drives.map(({ id, label, state }) => ({ id, label, state })),
     } : {}),
   };
-  print(result, true);
+  if (!interactiveOutput) print(result, true);
+  else {
+    say(`OneDrive · ${result.mounted}/${result.total} mounted`, result.mounted === result.total ? "success" : "pending");
+    if (details) for (const drive of drives) say(`${drive.label} · ${drive.state}`);
+    say(`Local AI · ${result.ai}`);
+    say(`Vault backup · ${result.backup}`, result.backup === "current" ? "success" : "pending");
+  }
 }
 async function signInHints(): Promise<void> {
   const current = await settings();
@@ -879,6 +961,128 @@ async function signInHints(): Promise<void> {
   for (const tenant of current.work)
     if (tenant.username) hints.push(`${tenant.label}: ${tenant.username}`);
   print(hints, false);
+}
+
+function codexDefaults(previous: string): string {
+  const current = Bun.TOML.parse(previous);
+  if (!object(current)) throw new Error("Expected a Codex TOML config.");
+  if (current.default_permissions !== undefined) return previous;
+
+  const assignments: string[] = [];
+  const expected = { ...current };
+  if (current.approval_policy === undefined) {
+    assignments.push('approval_policy = "never"');
+    expected.approval_policy = "never";
+  }
+  if (current.sandbox_mode === undefined) {
+    assignments.push('sandbox_mode = "workspace-write"');
+    expected.sandbox_mode = "workspace-write";
+  }
+
+  const sandbox = current.sandbox_workspace_write;
+  if (sandbox !== undefined && !object(sandbox)) throw new Error("Expected sandbox_workspace_write to be a TOML table.");
+  const networkDefault = expected.sandbox_mode === "workspace-write" && sandbox?.network_access === undefined;
+  if (!assignments.length && !networkDefault) return previous;
+  const candidates = [previous];
+  if (networkDefault) {
+    expected.sandbox_workspace_write = { ...sandbox, network_access: true };
+    const header = /^[ \t]*\[[ \t]*(?:sandbox_workspace_write|"sandbox_workspace_write"|'sandbox_workspace_write')[ \t]*\][ \t]*(?:#[^\r\n]*)?\r?$/gm;
+    const inline = /^[ \t]*(?:sandbox_workspace_write|"sandbox_workspace_write"|'sandbox_workspace_write')[ \t]*=[ \t]*\{[ \t]*/gm;
+    // Compare parsed settings before saving. This also rejects matches inside multiline strings.
+    for (const match of previous.matchAll(header)) {
+      const end = match.index + match[0].length;
+      candidates.push(previous.slice(0, end) + "\nnetwork_access = true" + previous.slice(end));
+    }
+    for (const match of previous.matchAll(inline)) {
+      const end = match.index + match[0].length;
+      const separator = previous[end] === "}" ? " " : ", ";
+      candidates.push(previous.slice(0, end) + "network_access = true" + separator + previous.slice(end));
+    }
+    candidates.push("sandbox_workspace_write.network_access = true\n" + previous);
+  }
+  const prefix = assignments.length ? "# Workshop defaults for new Codex sessions\n" + assignments.join("\n") + "\n\n" : "";
+  for (const candidate of candidates) {
+    const updated = prefix + candidate;
+    try {
+      assert.deepEqual(Bun.TOML.parse(updated), expected);
+      return updated;
+    } catch { /* Try the next TOML representation. */ }
+  }
+  throw new Error("Could not add Codex defaults without changing existing settings.");
+}
+
+const claudeNetworkDomains = ["github.com", "api.github.com", "raw.githubusercontent.com",
+  "codeload.github.com", "release-assets.githubusercontent.com", "registry.npmjs.org", "registry.npmjs.com"];
+
+function settingsSection(value: unknown, name: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!object(value)) throw new Error(`Expected Claude Code ${name} settings to be an object.`);
+  return value;
+}
+
+function claudeDefaults(previous: string): { content: string; sandboxEnabled: boolean } {
+  const current = settingsSection(previous ? JSON.parse(previous) : undefined, "user");
+  const permissions = settingsSection(current.permissions, "permissions");
+  const sandbox = settingsSection(current.sandbox, "sandbox");
+  const network = settingsSection(sandbox.network, "sandbox.network");
+  const defaults = {
+    enabled: true,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    failIfUnavailable: true,
+    ...sandbox,
+  };
+  const next = {
+    ...current,
+    permissions: { defaultMode: "acceptEdits", ...permissions },
+    sandbox: sandbox.enabled === false ? sandbox : {
+      ...defaults,
+      network: { allowedDomains: claudeNetworkDomains, ...network },
+    },
+  };
+  const content = JSON.stringify(next, null, 2) + "\n";
+  // Keep the original formatting when the settings are already equivalent.
+  try { assert.deepEqual(next, current); return { content: previous, sandboxEnabled: defaults.enabled === true }; }
+  catch { return { content, sandboxEnabled: defaults.enabled === true }; }
+}
+
+async function agentConfigSource(path: string): Promise<string | undefined> {
+  if (await exists(path) && !(await lstat(path)).isFile()) throw new Error(`Expected a regular file at ${path}`);
+  return read(path);
+}
+
+async function planAgentDefaults(): Promise<Step[]> {
+  const steps: Step[] = [];
+  const claudePath = join(process.env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "settings.json");
+  const codexPath = join(process.env.CODEX_HOME || join(home, ".codex"), "config.toml");
+  const claude = await agentConfigSource(claudePath);
+  const claudeSettings = claudeDefaults(claude ?? "");
+  if (claudeSettings.sandboxEnabled) {
+    const missing = [["bwrap", "bubblewrap"], ["socat", "socat"]]
+      .filter(([executable]) => !available(executable)).map(([, pkg]) => pkg);
+    if (missing.length)
+      steps.push({ kind: "command", id: "install-claude-sandbox-tools", argv: ["omarchy", "pkg", "add", ...missing] });
+  }
+  if (claudeSettings.content !== claude)
+    steps.push({ kind: "agent-config", path: claudePath, content: claudeSettings.content, previous: claude });
+  const codex = await agentConfigSource(codexPath);
+  const codexSettings = codexDefaults(codex ?? "");
+  if (codexSettings !== codex)
+    steps.push({ kind: "agent-config", path: codexPath, content: codexSettings, previous: codex });
+
+  const start = "<!-- >>> Workshop sandbox guidance >>> -->";
+  const end = "<!-- <<< Workshop sandbox guidance <<< -->";
+  const guidance = [start, "## Working in the Workshop sandbox", "",
+    "Proceed without asking for permission for routine work an experienced engineer would do in their own sandbox, including inspecting and editing project files, running builds and tests, and using Git for local work.",
+    "Use the permissions and sandbox boundaries provided by the session.", end].join("\n");
+  const codexInstructions = join(dirname(codexPath), "AGENTS.md");
+  const override = join(dirname(codexPath), "AGENTS.override.md");
+  for (const path of [join(dirname(claudePath), "CLAUDE.md"), (await agentConfigSource(override))?.trim() ? override : codexInstructions]) {
+    const previous = await agentConfigSource(path);
+    const content = upsertBlock(previous ?? "", start, end, guidance);
+    if (content !== previous) steps.push({ kind: "agent-config", path, content, previous });
+  }
+  return steps;
 }
 
 async function plan(features: Features): Promise<Step[]> {
@@ -903,15 +1107,18 @@ async function plan(features: Features): Promise<Step[]> {
   await file(declarations, configTypes);
   await file(editorWorkspace, privateEditorWorkspace(), { private: true });
   if (!await exists(conf)) await file(conf, configSource(current), { private: true });
+  steps.push(...await planAgentDefaults());
   if (!await exists(checkout)) steps.push({ kind: "checkout", path: checkout, repository: current.repository });
   else if (!await exists(join(checkout, ".git")) || !matchesRepository(capture(["git", "-C", checkout, "remote", "get-url", "origin"]), current.repository))
     throw new Error(`Expected the Workshop checkout at ${checkout}. Choose another --workspaces-root if this path is in use.`);
 
 
-  const enrollmentSource = await read(join(import.meta.dir, "ssh-enrollment.py")) ??
-    await read(join(checkoutPath(root), "ssh-enrollment.py")) ?? await read(sshEnrollment);
-  if (enrollmentSource === undefined) throw new Error("Run setup from the workshop checkout to install SSH enrollment.");
-  await file(sshEnrollment, enrollmentSource);
+  const legacyEnrollment = join(assetDir, "ssh-enrollment.auto.py");
+  if (await exists(legacyEnrollment) && (await lstat(legacyEnrollment)).isFile()) {
+    const previous = await read(legacyEnrollment);
+    if (previous !== undefined && createHash("sha256").update(previous).digest("hex") === "522cd6cbdf8ea2126b0d4e6291bc6167d1f39720922313e59c4fcf300406ffee")
+      steps.push({ kind: "remove", path: legacyEnrollment, previous });
+  }
 
   if (current.prompt.kind === "posh") {
     const source = await read(join(import.meta.dir, "snshah.omp.json")) ??
@@ -940,7 +1147,7 @@ async function plan(features: Features): Promise<Step[]> {
     steps.push({ kind: "command", id: "install-edge", argv: ["omarchy", "install", "browser", "edge"] });
   if (current.browser.kind === "edge-default" && capture(["xdg-settings", "get", "default-web-browser"], { ...process.env, XDG_CURRENT_DESKTOP: "" }) !== "microsoft-edge.desktop")
     steps.push({ kind: "command", id: "default-browser", argv: ["omarchy", "default", "browser", "edge"] });
-  for (const [executable, pkg] of [["age", "age"], ["gum", "gum"], ["herdr", "herdr"]] as const) {
+  for (const [executable, pkg] of [["age", "age"], ["herdr", "herdr"]] as const) {
     if (!available(executable)) steps.push({ kind: "command", id: `install-${pkg}`, argv: ["omarchy", "pkg", "add", pkg] });
   }
   const apps = join(data, "applications");
@@ -1016,7 +1223,94 @@ async function ollamaOnline(): Promise<boolean> {
   } catch { return false; }
 }
 
-async function apply(features: Features, json: boolean): Promise<void> {
+const workshopRemote = "https://github.com/shah/workshop.git";
+const installReceipt = join(assetDir, "installed-revision.auto.json");
+const commitSha = /^[0-9a-f]{40}$/;
+const stagedExecutableName = "snshah.auto.next";
+
+async function installedRevision(): Promise<string | undefined> {
+  const receipt = await read(installReceipt);
+  const installed = await read(bin);
+  if (!receipt || !installed) return undefined;
+  try {
+    const value = JSON.parse(receipt);
+    if (typeof value?.revision === "string" && commitSha.test(value.revision) && value.digest === digest(installed))
+      return value.revision;
+  } catch {}
+  return undefined;
+}
+
+async function commandOutput(argv: string[], quiet = false): Promise<string> {
+  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: quiet ? "ignore" : "inherit" });
+  const [output, status] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+  if (status !== 0) throw new Error(`${argv[0]} exited with status ${status}`);
+  return output;
+}
+
+async function updateWorkshop({ check, yes }: Extract<Command, { kind: "update" }>): Promise<void> {
+  if (process.getuid?.() === 0) throw new Error("Run snshah update as your desktop user.");
+  if (check && yes) throw new UsageError("Choose either --check or --yes.");
+  if (!check && !yes && !process.stdin.isTTY) throw new UsageError("Run update in a terminal or pass --yes.");
+  say("Checking GitHub for the latest Workshop revision.");
+  const ref = (await commandOutput(["git", "ls-remote", "--exit-code", workshopRemote, "refs/heads/main"])).trim();
+  const [revision, branch] = ref.split(/\s+/);
+  if (!commitSha.test(revision) || branch !== "refs/heads/main") throw new Error("GitHub returned an unexpected revision.");
+  if (await installedRevision() === revision) {
+    say(`Already up to date · v${cliVersion} · ${revision.slice(0, 12)}`, "success");
+    return;
+  }
+  const scratch = await mkdtemp(join(tmpdir(), "workshop.auto.update-"));
+  try {
+    const archive = join(scratch, "source.auto.tar.gz");
+    const candidate = join(scratch, "snshah.ts");
+    const downloadLabel = `📦  Downloading Workshop · ${revision.slice(0, 12)}`;
+    const progress = interactiveOutput ? (await cliPrompts()).spinner() : undefined;
+    if (progress) progress.start(downloadLabel);
+    else say(`Downloading Workshop · ${revision.slice(0, 12)}`);
+    try {
+      await run(["curl", "-fsSL", "--retry", "2", "--max-time", "60",
+        `https://codeload.github.com/shah/workshop/tar.gz/${revision}`, "-o", archive]);
+      await run(["tar", "-xzf", archive, "-C", scratch, "--strip-components=1"]);
+      if (!(await lstat(candidate)).isFile()) throw new Error("The downloaded revision does not contain a regular snshah.ts file.");
+      progress?.stop("✅  Workshop revision downloaded");
+    } catch (error) {
+      progress?.stop("❌  Workshop download failed", 1);
+      throw error;
+    }
+    const localModules = join(dirname(bin), "node_modules");
+    const candidateModules = join(scratch, "node_modules");
+    if (await exists(localModules) && !await exists(candidateModules)) await symlink(localModules, candidateModules, "dir");
+    const installer = [process.execPath, "--no-env-file", candidate];
+    const protocol = await commandOutput([...installer, "update-protocol"], true).catch(() => "");
+    if (protocol.trim() !== "1") throw new Error("This revision predates staged updates. The installed CLI was left in place.");
+    const env = { ...process.env, SNSHAH_INSTALL_REVISION: revision, SNSHAH_STAGE_UPDATE: "1" };
+    const candidateVersion = (await commandOutput([...installer, "--version"])).trim();
+    say(`Previewing ${revision.slice(0, 12)} · v${cliVersion} → ${candidateVersion}`);
+    await run([...installer, "plan"], { env });
+    if (check || !yes && !await confirm("Install this Workshop revision?")) return;
+    const original = await read(bin);
+    await run([...installer, "apply"], { env });
+    const staged = await read(join(scratch, stagedExecutableName));
+    if (!staged || staged !== await read(candidate)) throw new Error("The candidate did not stage the expected executable.");
+    await withApplyLock(async () => {
+      if (await read(bin) !== original) {
+        if (await installedRevision() === revision) return;
+        throw new Error("The installed CLI changed during this update. Run snshah update again.");
+      }
+      await recordRevision(revision, staged);
+      await atomicFile(bin, staged, 0o755);
+    });
+    say(`Workshop updated · ${candidateVersion} · ${revision.slice(0, 12)}`, "success");
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+async function recordRevision(revision: string, source: string): Promise<void> {
+  await atomicFile(installReceipt, JSON.stringify({ revision, digest: digest(source) }) + "\n", 0o600);
+}
+
+async function withApplyLock(operation: () => Promise<void>): Promise<void> {
   await mkdir(assetDir, { recursive: true });
   const lock = join(assetDir, "apply.auto.lock");
   try { await mkdir(lock, { mode: 0o700 }); }
@@ -1024,11 +1318,21 @@ async function apply(features: Features, json: boolean): Promise<void> {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Setup is locked: ${lock}. If the previous run was interrupted and has stopped, remove this empty directory.`);
     throw error;
   }
-  try {
+  try { await operation(); }
+  finally { await rm(lock, { recursive: true, force: true }); }
+}
+
+async function apply(features: Features, json: boolean): Promise<void> {
+  await withApplyLock(async () => {
+    const stagedUpdate = process.env.SNSHAH_STAGE_UPDATE === "1";
+    const revision = process.env.SNSHAH_INSTALL_REVISION;
+    if ((revision || stagedUpdate) && !commitSha.test(revision ?? "")) throw new Error("Invalid install revision.");
     const steps = await plan(features);
+    const executable = steps.find(step => step.kind === "file" && step.path === bin);
     const deferred = new Set<Step>();
     for (const step of steps) {
-      if (!json) console.log(stepLabel(step));
+      if (step === executable) continue;
+      if (!json) say(stepLabel(step));
       switch (step.kind) {
         case "editor":
           await run(["omarchy", "install", "editor", "vscode"], { quiet: json });
@@ -1044,11 +1348,26 @@ async function apply(features: Features, json: boolean): Promise<void> {
           try { await mountDrive(drive, env); }
           catch {
             deferred.add(step);
-            console.error(`OneDrive profile ${drive.id} could not mount. Check its sign-in and mount directory.`);
+            console.error(styled(`OneDrive profile ${drive.id} could not mount. Check its sign-in and mount directory.`, "pending"));
           }
           break;
         }
         case "file": await atomicFile(step.path, step.content, step.private ? 0o600 : step.executable ? 0o755 : undefined); break;
+        case "agent-config":
+          try {
+            if (await agentConfigSource(step.path) !== step.previous) throw new Error(`Agent settings changed during setup at ${step.path}. Run apply again.`);
+            const directory = dirname(step.path);
+            let existingParent = directory;
+            while (!await exists(existingParent)) existingParent = dirname(existingParent);
+            await access(existingParent, constants.W_OK);
+            await mkdir(directory, { recursive: true, mode: 0o700 });
+            await atomicFile(step.path, step.content, 0o600);
+          } catch (error) {
+            if (!member(["EACCES", "EPERM", "EROFS"], (error as NodeJS.ErrnoException).code)) throw error;
+            deferred.add(step);
+            console.error(styled(`Could not write ${step.path}. Re-run snshah apply from a regular Omarchy terminal.`, "pending"));
+          }
+          break;
         case "command": await run(step.argv, { quiet: json }); break;
         case "wait": await waitForOllama(); break;
         case "checkout": await createCheckout(step.path, step.repository); break;
@@ -1057,13 +1376,23 @@ async function apply(features: Features, json: boolean): Promise<void> {
           break;
       }
     }
+    if (revision) {
+      const source = await read(import.meta.path);
+      if (source === undefined) throw new Error("The installer source disappeared during apply.");
+      if (stagedUpdate) await atomicFile(join(import.meta.dir, stagedExecutableName), source, 0o755);
+      else await recordRevision(revision, source);
+    }
+    if (!stagedUpdate && executable?.kind === "file") {
+      if (!json) say("Installing the Workshop executable.");
+      await atomicFile(executable.path, executable.content, 0o755);
+    }
     if (json) print({
       completed: describe(steps.filter(step => !deferred.has(step))),
       ...(deferred.size ? { deferred: describe([...deferred]) } : {}),
     }, true);
-    else console.log(deferred.size ? `${product} setup complete with OneDrive mounts pending.` :
-      steps.length ? `${product} setup complete.` : "No changes needed.");
-  } finally { await rm(lock, { recursive: true, force: true }); }
+    else say(deferred.size ? `${product} setup complete with pending steps.` :
+      steps.length ? `${product} setup complete.` : "No changes needed.", deferred.size ? "pending" : "success");
+  });
 }
 
 async function waitForOllama(): Promise<void> {
@@ -1083,6 +1412,7 @@ function stepLabel(step: Step): string {
     case "mount": return `Mount OneDrive for ${step.id}`;
     case "directory": return "Prepare OneDrive mount directory";
     case "file":
+    case "agent-config":
     case "checkout":
     case "remove": return `${step.kind}: ${step.path}`;
   }
@@ -1109,7 +1439,10 @@ async function doctor(json: boolean): Promise<void> {
     localAI: current.localAI.kind,
     rclone: available("rclone"),
   };
-  print(json ? result : Object.entries(result).map(([key, value]) => `${key}: ${value ?? "unavailable"}`), json);
+  if (json) print(result, true);
+  else for (const [key, value] of Object.entries(result))
+    say(`${key} · ${typeof value === "boolean" ? value ? "Ready" : "Unavailable" : value ?? "Unavailable"}`,
+      value === true ? "success" : value === false || value === null ? "pending" : "action");
 }
 
 async function browser(url: string, id: string, app: boolean): Promise<void> {
@@ -1151,14 +1484,23 @@ async function openApp(app: PersonalApp): Promise<void> {
         for (const [label, app] of [["Outlook", "outlook"], ["Calendar", "calendar"], ["Teams", "teams"], ["OneDrive", "onedrive"]] as const)
           actions.set(`${tenantLabel} · ${label}`, { kind: "work", tenant: id, app });
       }
-      const argv = available("omarchy-menu-select")
-        ? ["omarchy-menu-select", "Workshop accounts", ...actions.keys()]
-        : ["gum", "choose", "--header", product, ...actions.keys()];
-      const child = Bun.spawn(argv, { stdin: "inherit", stdout: "pipe", stderr: "inherit" });
-      const [selection, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-      if (code === 130 || code === 1) return;
-      if (code !== 0) throw new Error(`gum exited with status ${code}`);
-      const action = actions.get(selection.trimEnd());
+      let selected: string;
+      if (available("omarchy-menu-select") && !process.stdin.isTTY) {
+        const child = Bun.spawn(["omarchy-menu-select", "Workshop accounts", ...actions.keys()],
+          { stdin: "inherit", stdout: "pipe", stderr: "inherit" });
+        const [selection, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+        if (code === 130 || code === 1) return;
+        if (code !== 0) throw new Error(`Omarchy menu exited with status ${code}`);
+        selected = selection.trimEnd();
+      } else {
+        if (!process.stdin.isTTY) throw new Error("Open the account picker in a terminal.");
+        const { select, isCancel } = await cliPrompts();
+        const selection = await select({ message: "🚀  Open an app or account",
+          options: [...actions.keys()].map(value => ({ value, label: value })) });
+        if (isCancel(selection)) return;
+        selected = selection;
+      }
+      const action = actions.get(selected);
       if (!action) throw new Error("The launcher returned an unknown action.");
       await execute(action);
     }
@@ -1188,14 +1530,17 @@ async function drive(action: "list" | "mount" | "connect" | "folder", id: string
   if (!entry) throw new Error("Set the tenant’s files.kind to rclone before using its mount.");
   switch (action) {
     case "connect":
-      console.log(`Create or reconnect the OneDrive remote named ${entry.remote.slice(0, -1)}, then run snshah drive mount ${id}.`);
+      say(`Create or reconnect the OneDrive remote named ${entry.remote.slice(0, -1)}, then run snshah drive mount ${id}.`);
       await run(["rclone", "config"], { env });
       return;
     case "folder":
       if (entry.state !== "mounted") throw new Error("Mount this OneDrive account before opening its folder.");
       launch(["xdg-open", entry.path]);
       return;
-    case "mount": await mountDrive(entry, env); return;
+    case "mount":
+      await mountDrive(entry, env);
+      if (interactiveOutput) say(`OneDrive mounted at ${entry.path}`, "success");
+      return;
     case "list":
       if (entry.state === "needs-sign-in") throw new Error("Connect this OneDrive account before listing files.");
       await run(["rclone", "lsf", entry.remote], { env });
@@ -1217,7 +1562,13 @@ function digest(text: string): string { return new Bun.CryptoHasher("sha256").up
 async function vault(action: "status" | "backup"): Promise<void> {
   if (action === "status") {
     const text = await exists(conf) ? await privateConfigBytes() : undefined;
-    print({ config: conf, staging: vaultStaging, backedUp: text !== undefined && digest(text) === await read(backupStamp), archives: await archives() }, true);
+    const backedUp = text !== undefined && digest(text) === await read(backupStamp);
+    const snapshots = await archives();
+    if (!interactiveOutput) print({ config: conf, staging: vaultStaging, backedUp, archives: snapshots }, true);
+    else {
+      say(backedUp ? "Vault backup is up to date." : "Vault backup is due.", backedUp ? "success" : "pending");
+      for (const snapshot of snapshots) say(snapshot);
+    }
     return;
   }
   const text = await privateConfigBytes();
@@ -1235,7 +1586,7 @@ async function vault(action: "status" | "backup"): Promise<void> {
     const destination = join(vaultStaging, `snshah-config-${stamp}.ts.age`);
     await rename(encrypted, destination);
     await atomicFile(backupStamp, digest(text), 0o600);
-    console.log(destination);
+    say(destination, "success");
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 
@@ -1265,17 +1616,17 @@ async function restore(command: Extract<Command, { kind: "restore" | "verify" }>
   try { new Bun.Transpiler({ loader: "ts" }).transformSync(text); }
   catch { throw new Error("Snapshot contains invalid TypeScript."); }
   if (command.kind === "verify") {
-    console.log("Snapshot format and TypeScript syntax verified. Review its code before loading.");
+    say("Snapshot format and TypeScript syntax verified. Review its code before loading.", "success");
     return;
   }
   if (await exists(conf) ? existing === undefined || await privateConfigBytes() !== existing : existing !== undefined)
     throw new Error("Config changed during restore.");
   await atomicFile(conf, text, 0o600);
-  console.log("Config restored. Review its code before running snshah config check.");
+  say("Config restored. Review its code before running snshah config check.", "success");
 }
 
 type MenuArgs =
-  | [kind: "help" | "plan" | "apply" | "doctor" | "workspace" | "context" | "shell" | "menu"]
+  | [kind: "help" | "update" | "plan" | "apply" | "doctor" | "workspace" | "context" | "shell" | "menu"]
   | ["plan" | "apply" | "doctor", "--json"] | ["status", "--details"] | ["test", ...[] | ["--published"]]
   | ["open", PersonalApp] | ["open", string, WorkApp]
   | ["agent", Agent] | ["drive", "list" | "mount" | "connect" | "folder", string]
@@ -1329,6 +1680,7 @@ function menuSections(work: readonly Tenant[]): MenuSection[] {
       { id: "revoke", label: "Revoke a device", args: ["ssh", "revoke"], terminal: true },
     ] },
     { id: "setup", label: "Setup & Diagnostics", actions: [
+      { id: "update", label: "📦 Update Workshop", args: ["update"], terminal: true },
       { id: "plan", label: "Preview changes", args: ["plan"], terminal: true },
       { id: "planjson", label: "Preview changes (JSON)", args: ["plan", "--json"], terminal: true },
       { id: "apply", label: "Apply changes", args: ["apply"], terminal: true },
@@ -1395,7 +1747,7 @@ async function menu(command: Extract<Command, { kind: "menu" }>): Promise<void> 
     }
     if (command.id === "config.secret") argv.push(await promptInput("Declared environment variable name"));
     if ((command.id === "setup.apply" || command.id === "setup.applyjson")) {
-      await execute(parse(["plan"]));
+      await dispatchCli(["plan"]);
       if (!await confirm("Apply these changes?")) return;
     }
     if (command.id === "vault.verify" || command.id === "vault.restore") {
@@ -1408,19 +1760,22 @@ async function menu(command: Extract<Command, { kind: "menu" }>): Promise<void> 
       }
     }
     if (command.id === "plugin.remove" && !await confirm("Remove the Workshop bar shortcut?")) return;
-    await execute(parse(argv));
+    await dispatchCli(argv);
   }
   if (action.terminal && process.stdin.isTTY) await promptInput("Press Enter to close").catch(() => {});
 }
 async function confirm(title: string): Promise<boolean> {
-  return await Bun.spawn(["gum", "confirm", title], { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited === 0;
+  if (!process.stdin.isTTY) throw new Error("Open this confirmation in a terminal.");
+  const { confirm, isCancel } = await cliPrompts();
+  const answer = await confirm({ message: `🛠️  ${title}`, initialValue: false });
+  return !isCancel(answer) && answer === true;
 }
 
 async function configure(action: "edit" | "check" | "setup"): Promise<void> {
   if (action === "edit") return editConfig();
   const previous = await privateConfigBytes();
   const current = await interpretConfig(previous);
-  if (action === "check") { console.log("Workshop config is valid."); return; }
+  if (action === "check") { say("Workshop config is valid.", "success"); return; }
   const personal = await promptInput("Personal profile display name");
   if (personal) current.personal = personal;
   for (const tenant of current.work) {
@@ -1453,47 +1808,398 @@ async function plugin(action: "install" | "remove" | "toggle"): Promise<void> {
   }
 }
 
+const enrolledKeyMarker = "snshah-enrolled:";
+const sshDeviceName = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,39}$/;
+const workshopKeyPath = "$HOME/.ssh/id_ed25519_workshop";
+
+function sshFingerprint(blob: Uint8Array): string {
+  return "SHA256:" + createHash("sha256").update(blob).digest("base64").replace(/=+$/, "");
+}
+
+function parseEnrollmentKey(line: string): { key: string; fingerprint: string } {
+  const [, key] = /^ssh-ed25519[ \t]+([A-Za-z0-9+/]{68})(?:[ \t]+[^\r\n]*)?$/.exec(line.trim()) ?? [];
+  const blob = Buffer.from(key ?? "", "base64");
+  const header = Buffer.from("0000000b7373682d6564323535313900000020", "hex");
+  if (blob.length !== 51 || !blob.subarray(0, header.length).equals(header))
+    throw new Error("Paste one valid ssh-ed25519 public key.");
+  return { key, fingerprint: sshFingerprint(blob) };
+}
+
+function enrolledDevice(line: string) {
+  const [type, key, marker, extra] = line.trim().split(/\s+/);
+  if (type !== "ssh-ed25519" || !marker?.startsWith(enrolledKeyMarker) || extra) return undefined;
+  const name = marker.slice(enrolledKeyMarker.length);
+  if (!sshDeviceName.test(name)) return undefined;
+  try { return { name, ...parseEnrollmentKey(`${type} ${key}`) }; }
+  catch { return undefined; }
+}
+
+async function readAuthorizedKeys(directory: string): Promise<string> {
+  const path = join(directory, "authorized_keys");
+  try {
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.uid !== process.getuid!() || info.mode & 0o022)
+      throw new Error("Expected a user-owned ~/.ssh directory without group or other write access.");
+    const file = await openFile(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.uid !== process.getuid!()) throw new Error("Expected a user-owned regular authorized_keys file.");
+      return await file.readFile("latin1");
+    } finally { await file.close(); }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+async function editAuthorizedKeys(directory: string, edit: (original: string) => string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await readAuthorizedKeys(directory);
+  const lock = join(directory, ".snshah-enrollment.auto.lock");
+  try { await mkdir(lock, { mode: 0o700 }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST")
+      throw new Error(`SSH key changes are locked at ${lock}. If the previous command stopped, remove that empty directory.`);
+    throw error;
+  }
+  try {
+    const original = await readAuthorizedKeys(directory);
+    const updated = edit(original);
+    if (await readAuthorizedKeys(directory) !== original) throw new Error("authorized_keys changed during enrollment. Try again.");
+    await atomicFile(join(directory, "authorized_keys"), Buffer.from(updated, "latin1"), 0o600);
+  } finally { await rm(lock, { recursive: true, force: true }); }
+}
+
+function authorizeDevice(directory: string, name: string, key: string): Promise<void> {
+  return editAuthorizedKeys(directory, original => {
+    const lines = original.split("\n");
+    if (lines.some(line => !line.trimStart().startsWith("#") && line.trim().split(/\s+/).includes(key)))
+      throw new Error("This key is already in authorized_keys.");
+    if (lines.some(line => enrolledDevice(line)?.name === name)) throw new Error("This device name is already enrolled.");
+    const separator = original && !original.endsWith("\n") ? "\n" : "";
+    return `${original}${separator}ssh-ed25519 ${key} ${enrolledKeyMarker}${name}\n`;
+  });
+}
+
+function revokeDevice(directory: string, name: string): Promise<void> {
+  return editAuthorizedKeys(directory, original => {
+    const updated = original.split(/(?<=\n)/).filter(line => enrolledDevice(line)?.name !== name).join("");
+    if (updated === original) throw new Error("No enrolled device has that name.");
+    return updated;
+  });
+}
+
+async function enrollmentInput(question: string, signal?: AbortSignal): Promise<string> {
+  const terminal = createInterface({ input: process.stdin, output: process.stdout });
+  try { return (await terminal.question(question, { signal })).trim(); }
+  finally { terminal.close(); }
+}
+
+async function chooseEnrollmentAddress() {
+  const choices = Object.entries(networkInterfaces()).flatMap(([name, addresses]) =>
+    (addresses ?? []).filter(address => address.family === "IPv4" && !address.internal && address.cidr)
+      .map(address => ({ name, ...address })));
+  if (!choices.length) throw new Error("No LAN IPv4 address found.");
+  const { select, isCancel } = await cliPrompts();
+  const choice = await select({ message: "🔑  Select the LAN address for SSH enrollment",
+    options: choices.map((address, value) => ({ value, label: `${address.name}  ${address.cidr}` })) });
+  return isCancel(choice) ? undefined : choices[choice];
+}
+
+function enrollmentSubnet(cidr: string): { cidr: string; contains: (address: string) => boolean } {
+  const [address, prefix] = cidr.split("/");
+  const ipv4 = (ip: string) => ip.split(".").reduce((value, octet) => (value * 256 + Number(octet)) >>> 0, 0);
+  const mask = Number(prefix) === 0 ? 0 : (0xffffffff << (32 - Number(prefix))) >>> 0;
+  const network = (ipv4(address) & mask) >>> 0;
+  const networkAddress = [24, 16, 8, 0].map(shift => (network >>> shift) & 255).join(".");
+  return { cidr: `${networkAddress}/${prefix}`, contains: ip => isIPv4(ip) && ((ipv4(ip) & mask) >>> 0) === network };
+}
+
+async function enrollmentFirewall(address: string, subnet: string, port: number): Promise<() => Promise<void>> {
+  const ufw = Bun.which("ufw");
+  if (!ufw) return async () => {};
+  const command = ["sudo", "env", "LC_ALL=C", ufw];
+  const status = Bun.spawn([...command, "status"], { stdin: "inherit", stdout: "pipe", stderr: "inherit" });
+  const output = await new Response(status.stdout).text();
+  if (await status.exited !== 0) throw new Error("Could not check the UFW firewall.");
+  if (!output.startsWith("Status: active")) return async () => {};
+  const rule = ["allow", "proto", "tcp", "from", subnet, "to", address, "port", String(port)];
+  const cleanup = async () => {
+    try { await run([...command, "--force", "delete", ...rule]); }
+    catch { throw new Error(`Remove the temporary rule with sudo ufw delete ${rule.join(" ")}`); }
+  };
+  try { await run([...command, ...rule, "comment", "snshah enrollment"]); }
+  catch (error) { await cleanup(); throw error; }
+  return cleanup;
+}
+
+const enrollmentClipboard = {
+  "1": `Get-Content "${workshopKeyPath}.pub" | Set-Clipboard`,
+  "2": `pbcopy < "${workshopKeyPath}.pub"`,
+  "3": `cat "${workshopKeyPath}.pub"`,
+} as const;
+
+function enrollmentLines(onLine: (line: string) => void, onCancel: () => void) {
+  let line = "";
+  return (data: Buffer) => {
+    for (const byte of data) {
+      if (byte === 3 || byte === 4) return onCancel();
+      if (byte === 13 || byte === 10) {
+        if (line) onLine(line);
+        line = "";
+      } else if (byte === 127 || byte === 8) {
+        line = line.slice(0, -1);
+      } else if (line.length >= 2048) {
+        return onCancel();
+      } else {
+        line += String.fromCharCode(byte);
+      }
+    }
+  };
+}
+
+// The pinned SSH module is loaded at runtime. Describe only the server methods used here.
+type EnrollmentChannel = Duplex & { exit: (status: number) => void };
+interface EnrollmentSession {
+  on(event: "pty", handler: (accept?: () => void) => void): void;
+  once(event: "shell", handler: (accept: () => EnrollmentChannel) => void): void;
+}
+interface EnrollmentClient {
+  on(event: "error", handler: (error: Error) => void): void;
+  on(event: "close" | "ready", handler: () => void): void;
+  on(event: "authentication", handler: (context: {
+    method: string; username: string; password?: string;
+    accept: () => void; reject: (methods: string[]) => void;
+  }) => void): void;
+  once(event: "session", handler: (accept: () => EnrollmentSession) => void): void;
+}
+
+async function enrollSshDevice(directory: string): Promise<void> {
+  if (process.getuid!() === 0 || !process.stdin.isTTY || !process.stdout.isTTY)
+    throw new Error("Open enrollment from a regular user's local terminal.");
+  const dependency = "ssh2@1.17.0";
+  const { Server, utils } = (await import(dependency).catch(error => {
+    throw new Error(`Could not load ${dependency}: ${errorMessage(error)}. Check Bun's package resolution and access to the npm registry.`);
+  })).default;
+  const choice = await chooseEnrollmentAddress();
+  if (!choice) return;
+  const hostKey = utils.generateKeyPairSync("rsa", { bits: 3072 });
+  const publicHostKey = utils.parseKey(hostKey.public);
+  if (publicHostKey instanceof Error) throw publicHostKey;
+  const subnet = enrollmentSubnet(choice.cidr!);
+  const code = Buffer.from(randomBytes(12).toString("base64url"));
+  const account = userInfo().username;
+  const controller = new AbortController();
+  const cancel = () => controller.abort(new Error("Enrollment canceled."));
+  const sockets = new Set<Socket>();
+  const result = Promise.withResolvers<void>();
+  // A failure can arrive while the firewall command is still running.
+  void result.promise.catch(() => {});
+  let codeUsed = false;
+  let accepting = false;
+  let failures = 0;
+  let connections = 0;
+  let approval: Promise<void> | undefined;
+  let cleanupFirewall: (() => Promise<void>) | undefined;
+  const abort = () => result.reject(controller.signal.reason);
+  const server = new Server({ hostKeys: [hostKey.private] }, (client: EnrollmentClient, info: { ip: string; port: number }) => {
+    let authenticated = false;
+    client.on("error", (error: Error) => { if (authenticated) result.reject(error); });
+    client.on("close", () => { if (authenticated) result.reject(new Error("Enrollment client disconnected.")); });
+    client.on("authentication", (context) => {
+      const password = Buffer.from(context.method === "password" ? context.password ?? "" : "");
+      if (!codeUsed && context.username === "enroll" && password.length === code.length && timingSafeEqual(password, code)) {
+        codeUsed = true;
+        authenticated = true;
+        for (const socket of sockets) {
+          if (socket.remoteAddress === info.ip && socket.remotePort === info.port) socket.setTimeout(0);
+          else socket.destroy();
+        }
+        context.accept();
+        listener.close();
+        return;
+      }
+      context.reject(["password"]);
+      if (context.method === "password" && ++failures >= 5)
+        result.reject(new Error("Too many enrollment authentication attempts."));
+    });
+    client.on("ready", () => {
+      client.once("session", accept => {
+        const session = accept();
+        session.on("pty", allow => allow?.());
+        session.once("shell", openShell => {
+          const stream = openShell();
+          stream.on("error", (error: Error) => result.reject(error));
+          stream.on("end", () => result.reject(new Error("Enrollment client disconnected.")));
+          let osSelected = false;
+          const send = (message: string) => stream.write(message.replaceAll("\n", "\r\n"));
+          stream.on("data", enrollmentLines(line => {
+            if (approval) return;
+            if (!osSelected) {
+              if (!member(["1", "2", "3"], line)) {
+                send("\nChoose 1, 2, or 3: ");
+                return;
+              }
+              osSelected = true;
+              send(`\nIn another local terminal, reuse an Ed25519 key or create one:\n  ssh-keygen -t ed25519 -f "${workshopKeyPath}"\n` +
+                `Copy or display the public key with:\n  ${enrollmentClipboard[line]}\nPaste the single ssh-ed25519 line here and press Enter:\n`);
+              return;
+            }
+            let submitted: ReturnType<typeof parseEnrollmentKey>;
+            try { submitted = parseEnrollmentKey(line); }
+            catch { send("\nPaste one valid ssh-ed25519 public key: "); return; }
+            approval = (async () => {
+              say(`Request from ${info.ip} for ${account}. Public key: ${submitted.fingerprint}`, "pending");
+              const name = await enrollmentInput("Enter a device name to approve, or press Enter to deny: ", controller.signal);
+              controller.signal.throwIfAborted();
+              if (stream.destroyed || stream.readableEnded) throw new Error("Enrollment client disconnected.");
+              if (!name) {
+                send("\nEnrollment denied.\n");
+                stream.exit(1);
+              } else {
+                if (!sshDeviceName.test(name)) throw new Error("Use 1–40 letters, digits, underscores, dots, or hyphens.");
+                await authorizeDevice(directory, name, submitted.key);
+                say(`Enrolled ${name}. Normal SSH account: ${account}@${choice.address}`, "success");
+                send(`\nApproved. Verify the normal SSH host fingerprint on first connection.\n  ssh -i "${workshopKeyPath}" ${account}@${choice.address}\n` +
+                  "If you reused a key, substitute its private key path.\n");
+                stream.exit(0);
+              }
+              stream.end();
+            })();
+            void approval.then(() => result.resolve(), error => result.reject(error));
+          }, () => result.reject(new Error("Enrollment canceled by the client."))));
+          send("\nSSH key enrollment\n1. Windows PowerShell\n2. macOS\n3. Linux / WSL\nChoose 1, 2, or 3: ");
+        });
+      });
+    });
+  });
+  const listener = createServer(socket => {
+    if (!accepting || codeUsed || sockets.size >= 4 || !subnet.contains(socket.remoteAddress ?? "")) {
+      socket.destroy();
+      return;
+    }
+    if (++connections > 12) {
+      socket.destroy();
+      result.reject(new Error("Too many enrollment connections."));
+      return;
+    }
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.on("close", () => sockets.delete(socket));
+    socket.setTimeout(60_000, () => socket.destroy());
+    server.injectSocket(socket);
+  });
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  controller.signal.addEventListener("abort", abort, { once: true });
+  process.on("SIGINT", cancel);
+  process.on("SIGTERM", cancel);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      listener.once("error", reject);
+      listener.listen(0, choice.address, resolve);
+    });
+    const port = (listener.address() as AddressInfo).port;
+    cleanupFirewall = await enrollmentFirewall(choice.address, subnet.cidr, port);
+    controller.signal.throwIfAborted();
+    timeout = setTimeout(() => controller.abort(new Error("Enrollment expired.")), 300_000);
+    accepting = true;
+    say(`On the new PC, run: ssh -p ${port} enroll@${choice.address}`);
+    say(`Verify this enrollment host fingerprint: ${sshFingerprint(publicHostKey.getPublicSSH())}`);
+    say(`One-time password: ${code.toString()}\nWaiting up to five minutes. Press Ctrl+C to cancel.`, "pending");
+    await result.promise;
+    // Give the client a chance to receive the exit message before closing its socket.
+    await Bun.sleep(150);
+  } finally {
+    controller.abort();
+    await approval?.catch(() => {});
+    clearTimeout(timeout);
+    listener.close();
+    for (const socket of sockets) socket.destroy();
+    try { await cleanupFirewall?.(); }
+    finally {
+      process.off("SIGINT", cancel);
+      process.off("SIGTERM", cancel);
+    }
+  }
+}
+
+async function workshopSsh(command: Extract<Command, { kind: "ssh" }>): Promise<void> {
+  const directory = join(home, ".ssh");
+  if (command.action === "enroll") return enrollSshDevice(directory);
+  if (command.action === "revoke") {
+    const name = command.device ?? await promptInput("Device name to revoke");
+    await revokeDevice(directory, name);
+    say(`Revoked ${name}. Existing SSH sessions remain open.`, "success");
+    return;
+  }
+  const devices = (await readAuthorizedKeys(directory)).split("\n").map(enrolledDevice).filter(device => device !== undefined);
+  if (command.action === "devices") {
+    if (!devices.length) say("No devices enrolled through Workshop.", "pending");
+    for (const device of devices) say(`${device.name}  ${device.fingerprint}`);
+    return;
+  }
+  const device = devices.find(item => item.name === command.device);
+  if (!device) throw new Error("Enroll a device first, then run snshah ssh enable DEVICE.");
+  await run(["omarchy", "setup", "security", "sshd", `--key=ssh-ed25519 ${device.key} ${enrolledKeyMarker}${device.name}`]);
+  for (const path of (await readdir("/etc/ssh")).sort())
+    if (/^ssh_host_.*_key\.pub$/.test(path)) await run(["ssh-keygen", "-lf", join("/etc/ssh", path)]);
+}
+
 async function execute(command: Command): Promise<void> {
   switch (command.kind) {
-    case "help": console.log(usage); return;
+    case "update": await updateWorkshop(command); return;
     case "shell": console.log(await shellCode(command.shell)); return;
     case "workspace": {
       const current = await settings();
-      console.log(checkoutPath(command.root ?? current.workspacesRoot, current.repository));
+      say(checkoutPath(command.root ?? current.workspacesRoot, current.repository));
       return;
     }
     case "test": await selfTest(command.published); return;
     case "context":
-      console.log(process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX || process.env.CLAUDECODE || process.env.OPENCODE ? "AGENT" :
+      say(process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX || process.env.CLAUDECODE || process.env.OPENCODE ? "AGENT" :
         process.env.HERDR_PANE_ID || process.env.HERDR_SESSION_ID || process.env.HERDR ? "HERDR" : "HUMAN");
       return;
     case "status": await workstationStatus(command.details); return;
     case "doctor": await doctor(command.json); return;
-    case "ssh": {
-      if (!await exists(sshEnrollment)) throw new Error("Run snshah apply from the Workshop checkout first.");
-      await run(["/usr/bin/python", "-I", sshEnrollment, command.action, ...(command.device ? [command.device] : [])]);
+    case "ssh": await workshopSsh(command); return;
+    case "open":
+      if (interactiveOutput && !member(["menu", "hints"], command.app)) say(`Opening ${command.app}.`);
+      await openApp(command.app);
       return;
-    }
-    case "open": await openApp(command.app); return;
-    case "work": await browser(urls[command.app], command.tenant, command.app !== "browser"); return;
-    case "agent": await runAgent(command.agent, command.directory); return;
+    case "work":
+      if (interactiveOutput) say(`Opening ${command.app} for ${command.tenant}.`);
+      await browser(urls[command.app], command.tenant, command.app !== "browser");
+      return;
+    case "agent":
+      if (interactiveOutput) say(`Starting ${command.agent} in ${command.directory}`);
+      await runAgent(command.agent, command.directory);
+      return;
     case "drive": await drive(command.action, command.tenant); return;
     case "vault": await vault(command.action); return;
     case "restore":
     case "verify": await restore(command); return;
     case "config": await configure(command.action); return;
-    case "set-secret": await setSecret(command.variable); return;
+    case "set-secret":
+      await setSecret(command.variable);
+      say("Secret saved.", "success");
+      return;
     case "menu": await menu(command); return;
     case "shell-env":
       if (process.stdout.isTTY) throw new Error("Load these exports via snshah shell.");
       for (const secret of (await settings()).secrets)
         if (secret.value && secret.scope === "shell") console.log(`export ${secret.variable}=${shellQuote(secret.value)}`);
       return;
-    case "plugin": await plugin(command.action); return;
+    case "plugin":
+      await plugin(command.action);
+      if (interactiveOutput && command.action !== "toggle")
+        say(command.action === "install" ? "Workshop widget ready." : "Workshop widget removed.", "success");
+      return;
     case "plan": {
       const steps = await plan(command.features);
       if (command.json) print(describe(steps), true);
-      else print(steps.length ? steps.map(stepLabel) : "No changes needed.", false);
+      else if (steps.length) print(steps.map(stepLabel), false);
+      else say("No changes needed.", "success");
       return;
     }
     case "apply": {
@@ -1508,9 +2214,14 @@ async function execute(command: Command): Promise<void> {
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
-try { await execute(parse(Bun.argv.slice(2))); }
+try {
+  const argv = Bun.argv.slice(2);
+  if (argv.length === 1 && member(["--version", "-V"], argv[0])) console.log(`v${cliVersion}`);
+  else if (argv.length === 1 && argv[0] === "update-protocol") console.log("1");
+  else await dispatchCli(argv);
+}
 catch (error) {
-  console.error(`snshah: ${errorMessage(error)}`);
+  console.error(styled(`snshah: ${errorMessage(error)}`, "error"));
   process.exitCode = error instanceof UsageError ? 2 : 1;
 }
 
@@ -1583,9 +2294,10 @@ import { mkdirSync } from "node:fs";
 const argv = Bun.argv.slice(2);
 if (argv[0] === "clone") mkdirSync(argv.at(-1) + "/.git", { recursive: true });
 else if (argv[0] === "-C" && argv[2] === "remote") console.log("https://github.com/shah/workshop.git");
+else if (argv[0] === "ls-remote" && argv.length === 4) console.log("0123456789abcdef0123456789abcdef01234567\trefs/heads/main");
 else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdout: "inherit", stderr: "inherit" }).exitCode ?? 1;
 `, { mode: 0o755 });
-    for (const tool of ["gum", "herdr", "omarchy-shell", "fusermount3"])
+    for (const tool of ["herdr", "omarchy-shell", "fusermount3", "bwrap", "socat"])
       await writeFile(join(tools, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     await writeFile(join(tools, "age"), '#!/bin/sh\nif [ "$1" = "-d" ]; then cat "$3"; else cat > "$3"; fi\n', { mode: 0o755 });
     await writeFile(join(tools, "microsoft-edge-stable"), '#!/bin/sh\nprintf "%s\\n" "$@" >> "$HOME/browser.auto.log"\n', { mode: 0o755 });
@@ -1615,8 +2327,59 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
       : ["sh", "bootstrap.sh", ...flags];
     assert.match(invoke(...bootstrap), /Workshop setup complete/);
     assert.equal(invoke("snshah", "workspace"), checkoutPath(root) + "\n");
+    assert.equal(invoke("snshah", "--version"), `v${cliVersion}\n`);
+    assert.equal(invoke("snshah", "-V"), `v${cliVersion}\n`);
     assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     assert.equal(invoke(...bootstrap), "No changes needed.\n");
+    if (!published) {
+      const candidateDirectory = join(fixture, "update.auto.source");
+      const candidateArchive = join(fixture, "update.auto.tar.gz");
+      const candidatePath = join(candidateDirectory, "snshah.ts");
+      const oldBin = join(fixture, ".local/bin/snshah");
+      const original = await readFile(oldBin, "utf8");
+      const candidate = original + "\n// Fixture update\n";
+      await mkdir(candidateDirectory);
+      async function stageCandidate(sourceCode: string) {
+        await writeFile(candidatePath, sourceCode);
+        await run(["tar", "-czf", candidateArchive, "-C", fixture, basename(candidateDirectory)]);
+      }
+      await stageCandidate(candidate);
+      await rm(join(tools, "curl"), { force: true });
+      await writeFile(join(tools, "curl"), `#!/usr/bin/env bun
+const argv = Bun.argv.slice(2);
+const output = argv[argv.indexOf("-o") + 1];
+if (!argv.includes("https://codeload.github.com/shah/workshop/tar.gz/0123456789abcdef0123456789abcdef01234567")) process.exit(2);
+if (await Bun.file(process.env.HOME + "/update.auto.fail-download").exists()) process.exit(1);
+await Bun.write(output, Bun.file(process.env.HOME + "/update.auto.tar.gz"));
+`, { mode: 0o755 });
+      assert.match(invoke("snshah", "update", "--check"), /Previewing 0123456789ab/);
+      assert.equal(await readFile(oldBin, "utf8"), original);
+      await writeFile(join(fixture, "update.auto.fail-download"), "");
+      assert.equal(Bun.spawnSync(["snshah", "update", "--yes"], { env, cwd: source }).exitCode, 1);
+      await rm(join(fixture, "update.auto.fail-download"));
+      assert.equal(await readFile(oldBin, "utf8"), original);
+      await stageCandidate('console.error("legacy usage output"); process.exitCode = 2;');
+      const legacy = Bun.spawnSync(["snshah", "update", "--yes"], { env, cwd: source });
+      assert.equal(legacy.exitCode, 1);
+      assert.match(legacy.stderr.toString(), /predates staged updates/);
+      assert(!legacy.stderr.toString().includes("legacy usage output"));
+      assert.equal(await readFile(oldBin, "utf8"), original);
+      const failing = candidate.replace("    if (revision) {\n      const source", '    if (revision) {\n      throw new Error("fixture apply failure");\n      const source');
+      assert.notEqual(failing, candidate);
+      await stageCandidate(failing);
+      const rejected = Bun.spawnSync(["snshah", "update", "--yes"], { env, cwd: source });
+      assert.equal(rejected.exitCode, 1);
+      assert.match(rejected.stderr.toString(), /fixture apply failure/);
+      assert.equal(await readFile(oldBin, "utf8"), original);
+      await stageCandidate(candidate);
+      assert.match(invoke("snshah", "update", "--yes"), /Workshop updated/);
+      assert.equal(await readFile(oldBin, "utf8"), candidate);
+      assert.match(invoke("snshah", "update", "--check"), /Already up to date/);
+      await atomicFile(oldBin, original, 0o755);
+      await rm(join(tools, "curl"));
+      const systemCurl = Bun.which("curl");
+      if (systemCurl) await symlink(systemCurl, join(tools, "curl"));
+    }
     const oldDot = join(desktop, "Shahid's Workstation ChatGPT Dot.desktop");
     await writeFile(oldDot, "[Desktop Entry]\nName=Shahid's Workstation ChatGPT Dot\nExec=snshah open dot\n");
     assert.match(invoke("snshah", "apply"), /Workshop setup complete/);
@@ -1645,6 +2408,27 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const menuFile = join(fixture, ".config/omarchy/extensions/omarchy-menu.jsonc");
     assert.match(await readFile(menuFile, "utf8"), /Remote Access/);
     assert.equal(invoke("snshah", "ssh", "devices"), "No devices enrolled through Workshop.\n");
+    const keyBlob = Buffer.concat([Buffer.from("0000000b7373682d6564323535313900000020", "hex"), Buffer.alloc(32, 1)]);
+    const enrolledKey = parseEnrollmentKey(`ssh-ed25519 ${keyBlob.toString("base64")} fixture`);
+    assert.throws(() => parseEnrollmentKey("ssh-ed25519 invalid"));
+    const sshDirectory = join(fixture, ".ssh");
+    const authorized = join(sshDirectory, "authorized_keys");
+    await mkdir(sshDirectory, { mode: 0o700 });
+    await writeFile(authorized, "# existing key comment\n");
+    await authorizeDevice(sshDirectory, "laptop", enrolledKey.key);
+    await assert.rejects(authorizeDevice(sshDirectory, "other", enrolledKey.key), /already/);
+    assert.equal((await stat(authorized)).mode & 0o777, 0o600);
+    assert.equal(invoke("snshah", "ssh", "devices"), `laptop  ${enrolledKey.fingerprint}\n`);
+    assert.match(invoke("snshah", "ssh", "revoke", "laptop"), /Revoked laptop/);
+    assert.equal(await readFile(authorized, "utf8"), "# existing key comment\n");
+    const subnet = enrollmentSubnet("192.168.11.3/24");
+    assert.equal(subnet.cidr, "192.168.11.0/24");
+    assert(subnet.contains("192.168.11.90") && !subnet.contains("192.168.12.90") && !subnet.contains(""));
+    const received: string[] = [];
+    const parser = enrollmentLines(line => received.push(line), () => received.push("canceled"));
+    parser(Buffer.from("1\r\nssh-ed"));
+    parser(Buffer.from("25519\r\u0003"));
+    assert.deepEqual(received, ["1", "ssh-ed25519", "canceled"]);
     assert.deepEqual(settings.work, []);
     assert.equal(settings.repository, "shah/workshop");
     await writeFile(fixtureConf, configSource({ ...settings, repository: "example/another-repo" }));
@@ -1744,8 +2528,13 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert(!exportCheck.stderr.toString().includes(fake));
     for (const section of menuSections(work)) {
       assert.equal(new Set(section.actions.map(action => action.id)).size, section.actions.length);
-      for (const action of section.actions) parse(action.args.join(" ") === "config set-secret"
-        ? [...action.args, "SNSH_TEST_COMMAND"] : action.args);
+      for (const action of section.actions) {
+        if (action.args[0] === "help") continue;
+        let dispatched = false;
+        await dispatchCli(action.args.join(" ") === "config set-secret"
+          ? [...action.args, "SNSH_TEST_COMMAND"] : action.args, async () => { dispatched = true; });
+        assert(dispatched, `Menu action does not resolve: ${action.id}`);
+      }
     }
     const menuText = await readFile(join(fixture, ".config/omarchy/extensions/omarchy-menu.jsonc"), "utf8");
     assert(menuText.includes("Edit in VS Code") && menuText.includes("Restore snapshot") && !menuText.includes(fake));
@@ -1787,10 +2576,7 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
       secrets: [{ variable: "EXAMPLE_ROTATE_TOKEN", value: "", scope: "command", commands: ["codex"] }],
     }).replace('\n  }\n] satisfies WorkstationConfig["secrets"];',
       "\n  },\n] satisfies WorkstationConfig['secrets']");
-    await writeFile(fixtureConf, formatted);
-    await writeFile(join(tools, "gum"), '#!/bin/sh\ntest "$1" = input && test "$4" = --password || exit 2\nprintf "%s\\n" "new-fixture-token"\n', { mode: 0o755 });
-    invoke("snshah", "config", "set-secret", "EXAMPLE_ROTATE_TOKEN");
-    const rotated = await interpretConfig(await readFile(fixtureConf, "utf8"));
+    const rotated = await interpretConfig(await rotateSecret(formatted, "EXAMPLE_ROTATE_TOKEN", async () => "new-fixture-token"));
     assert.equal(rotated.secrets[0]?.value, "new-fixture-token");
     const fresh = join(fixture, "home.auto.fresh");
     await mkdir(join(fresh, ".config/hypr"), { recursive: true });
@@ -1799,8 +2585,42 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert.match(invoke("bun", import.meta.path, "apply"), /Workshop setup complete/);
     assert(await exists(checkoutPath(join(fresh, "Work"))));
     assert(await exists(join(fresh, ".config/oh-my-posh/snshah.auto.omp.json")));
+    const freshCodex = join(fresh, ".codex/config.toml");
+    const freshClaude = join(fresh, ".claude/settings.json");
+    assert.deepEqual(Bun.TOML.parse(await readFile(freshCodex, "utf8")), {
+      approval_policy: "never", sandbox_mode: "workspace-write", sandbox_workspace_write: { network_access: true },
+    });
+    const claude = JSON.parse(await readFile(freshClaude, "utf8"));
+    assert.equal(claude.permissions.defaultMode, "acceptEdits");
+    assert.equal(claude.sandbox.autoAllowBashIfSandboxed, true);
+    assert.equal(claude.sandbox.allowUnsandboxedCommands, false);
+    assert.equal(claude.sandbox.failIfUnavailable, true);
+    assert(claude.sandbox.network.allowedDomains.includes("github.com"));
+    for (const path of [freshCodex, freshClaude]) assert.equal((await stat(path)).mode & 0o777, 0o600);
+    for (const path of [".codex/AGENTS.md", ".claude/CLAUDE.md"])
+      assert.match(await readFile(join(fresh, path), "utf8"), /Proceed without asking for permission/);
+    for (const chunk of [
+      '[sandbox_workspace_write]\nwritable_roots = ["/tmp"]\n',
+      'sandbox_workspace_write = { writable_roots = ["/tmp"] }\n',
+      'sandbox_workspace_write.writable_roots = ["/tmp"]\n',
+    ]) {
+      const custom = 'model = "custom"\napproval_policy = "on-request"\n' + chunk;
+      const merged = codexDefaults(custom);
+      assert.deepEqual(Bun.TOML.parse(merged), { model: "custom", approval_policy: "on-request", sandbox_mode: "workspace-write",
+        sandbox_workspace_write: { writable_roots: ["/tmp"], network_access: true } });
+      assert.equal(codexDefaults(merged), merged);
+    }
+    const selectedProfile = 'default_permissions = "custom"\n';
+    assert.equal(codexDefaults(selectedProfile), selectedProfile);
+    const customClaude = '{"model":"custom","permissions":{"defaultMode":"default","deny":["Bash(example)"]},"sandbox":{"network":{"allowedDomains":["example.org"]}}}';
+    const mergedClaude = claudeDefaults(customClaude).content;
+    const parsedClaude = JSON.parse(mergedClaude);
+    assert.equal(parsedClaude.model, "custom");
+    assert.deepEqual(parsedClaude.permissions, { defaultMode: "default", deny: ["Bash(example)"] });
+    assert.deepEqual(parsedClaude.sandbox.network.allowedDomains, ["example.org"]);
+    assert.equal(claudeDefaults(mergedClaude).content, mergedClaude);
     const freshBin = join(fresh, ".local/bin/snshah");
     assert.equal(invoke(freshBin, "plan", "--json"), "[]\n");
-    console.log("Workshop self-test passed.");
+    say("Workshop self-test passed.", "success");
   } finally { await rm(fixture, { recursive: true, force: true }); }
 }

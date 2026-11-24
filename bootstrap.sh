@@ -29,7 +29,7 @@ main() {
   curl -fsSL "https://codeload.github.com/shah/workshop/tar.gz/$revision" -o "$scratch/source.auto.tar.gz"
   tar -xzf "$scratch/source.auto.tar.gz" -C "$scratch" --strip-components=1
   install_bun
-  bun --no-env-file "$scratch/snshah.ts" apply "$@"
+  SNSHAH_INSTALL_REVISION="$revision" bun --no-env-file "$scratch/snshah.ts" apply "$@"
 }
 
 install_bun() {

@@ -11,12 +11,17 @@
 
 ## Source and privacy
 
-- Keep the CLI, runtime config templates, the Omarchy menu and plugin, and self-tests in `snshah.ts`. The isolated SSH enrollment listener and key management live in `ssh-enrollment.py`. `bootstrap.sh` is the thin native setup entry point. `snshah.omp.json` is the standalone optional theme. Use `.auto.` in generated and interim filenames where the consumer permits it.
+- Keep executable behavior, including SSH enrollment, along with runtime config templates, the Omarchy menu and plugin, and self-tests in `snshah.ts`. `bootstrap.sh` is the thin native setup entry point. `snshah.omp.json` is the standalone optional theme. Use `.auto.` in generated and interim filenames where the consumer permits it.
+- Proceed without asking for permission for routine work an experienced engineer would do in their own sandbox. Keep the generated Codex and Claude Code defaults and user-level guidance in sync with the README. Preserve explicit user settings and unrelated instructions.
+- Keep command definitions in Commander, terminal prompts in Clack, and color in Chalk. Keep the Bun dependency versions pinned in `snshah.ts`. Preserve clean JSON and shell output and use human-readable colors and labels for terminal output.
+- Keep update and bootstrap pinned to the resolved `shah/workshop` commit. Preserve the installed executable until the candidate finishes applying its setup steps. Cover preview, successful installation, download failure, and apply failure in the self-test.
 - `~/.config/snshah.conf.ts` is the only user-editable Workshop settings file. It is executable TypeScript, owned by the user and restricted to mode `0600`. Keep actual profile labels, email addresses, tokens, and archives out of Git, screenshots, tests, and diagnostics. The age vault encrypts only this config. Prefer command-scoped tokens and export to interactive shells only when explicitly configured.
 - **Configuration → Edit in VS Code** and `snshah config edit` open a dedicated generated workspace, refresh the declarations, and watch for saves. Keep the embedded editor defaults and Bun recommendation in sync with `.vscode/`. Preserve built-in TypeScript formatting, semantic diagnostics, the manual config-check task, and the backup reminder. Keep the parent config directory outside the Explorer.
 - The native Omarchy submenu exposes CLI actions. The optional Workshop bar widget uses Omarchy components and the typed `snshah status` response. Keep its compact state free of account identifiers and only fetch panel labels while open. Keep plugin source in this repository and leave registry publication to a separate release decision.
 
 ## Verify before shipping
+
+- Every push to GitHub `main` publishes a new CLI version. Check the version on remote `main` and advance `cliVersion` in `snshah.ts` before each push. The first version is `0.1.0`. While the CLI is in `0.x`, bump the patch for fixes and docs-only pushes, and the minor for new features or breaking changes. Starting at `1.0.0`, use the major version for breaking changes. Verify that `snshah --version` shows the new version.
 
 - Run `bun --no-env-file ./snshah.ts test`. Check that planning is stable, that the second apply is empty, and that formatting keeps managed secret declarations compatible with hidden token entry. After pushing, `bun --no-env-file ./snshah.ts test --published` checks the README installer against GitHub.
 - If editor behavior changes, verify TypeScript formatting and diagnostics using a fake config, and test the save notification in an isolated home. If the menu or bar changes, update the README screenshots from an isolated Omarchy session with sample accounts.
