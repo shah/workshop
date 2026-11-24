@@ -21,6 +21,9 @@
 
 ## Verify before shipping
 
+- Before each push to `main`, run `bun fmt` from the repository root and require `bun fmt --check` to pass. Include formatter changes in the same push. Use Bun 1.4.4 or newer.
+- Use `bun fmt` when generating or updating `snshah.conf.ts`, its type declarations, and its editor workspace. Pipe private settings to the formatter and preserve quoted secret keys so hidden secret entry continues to work.
+
 - Every push to GitHub `main` publishes a new CLI version. Check the version on remote `main` and advance `cliVersion` in `snshah.ts` before each push. The first version is `0.1.0`. While the CLI is in `0.x`, bump the patch for fixes and docs-only pushes, and the minor for new features or breaking changes. Starting at `1.0.0`, use the major version for breaking changes. Verify that `snshah --version` shows the new version.
 
 - Run `bun --no-env-file ./snshah.ts test`. Check that planning is stable, that the second apply is empty, and that formatting keeps managed secret declarations compatible with hidden token entry. After pushing, `bun --no-env-file ./snshah.ts test --published` checks the README installer against GitHub.

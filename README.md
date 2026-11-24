@@ -48,16 +48,16 @@ Run `snshah --help` for the full command list and `snshah ssh --help` for a comm
 
 Setup checks for existing apps and launchers before using Omarchy's installers. Run `snshah plan` to see what is missing.
 
-| Default | Installation path |
-| --- | --- |
-| Bun | `omarchy pkg add bun`, with `omarchy pkg aur add bun-bin` as fallback, before the CLI runs |
-| VS Code | `omarchy install editor vscode` when `code` is missing |
-| Microsoft Edge | `omarchy install browser edge`, then `omarchy default browser edge` |
-| Oh My Posh | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme |
-| age, Herdr, rclone, FUSE | `omarchy pkg add` when missing |
-| Spotify | `omarchy install service spotify` if a client or web launcher is missing |
-| WhatsApp and Discord | Existing enabled launchers, or Omarchy web apps if missing or hidden |
-| Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`. |
+| Default                                            | Installation path                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Bun                                                | `omarchy pkg add bun`, with `omarchy pkg aur add bun-bin` as fallback, before the CLI runs |
+| VS Code                                            | `omarchy install editor vscode` when `code` is missing                                     |
+| Microsoft Edge                                     | `omarchy install browser edge`, then `omarchy default browser edge`                        |
+| Oh My Posh                                         | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme                        |
+| age, Herdr, rclone, FUSE                           | `omarchy pkg add` when missing                                                             |
+| Spotify                                            | `omarchy install service spotify` if a client or web launcher is missing                   |
+| WhatsApp and Discord                               | Existing enabled launchers, or Omarchy web apps if missing or hidden                       |
+| Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`.                                     |
 
 Ollama and local OpenCode are opt-in. Setup creates the personal OneDrive mount directory and mounts an already-configured remote when available. First-time Microsoft sign-in remains interactive.
 
@@ -69,16 +69,16 @@ Ollama and local OpenCode are opt-in. Setup creates the personal OneDrive mount 
 
 Use the arrow keys and Enter, or type to filter. Each configured tenant gets a submenu, numbered in config order. **Open → Accounts by name** reads private display names at runtime. The generated Omarchy menu file uses generic titles. Agent sessions, mounts, vault passphrases, and secret entry open in an Omarchy terminal. **Setup & Diagnostics → Apply changes** previews the changes and asks for confirmation.
 
-| Menu | CLI |
-| --- | --- |
-| Open | `snshah open gmail`, `snshah open voice`, `snshah open menu`, `snshah open hints` |
-| Personal OneDrive | `snshah drive connect personal`, `snshah drive mount personal`, `snshah drive folder personal` |
-| Tenant submenus | `snshah open studio outlook`, `snshah drive list research`, `snshah drive mount research` |
-| Agents | `snshah agent claude\|codex\|local [directory]` |
-| Configuration | `snshah config setup\|check\|edit`, `snshah config set-secret VARIABLE`, `snshah shell` |
+| Menu                | CLI                                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Open                | `snshah open gmail`, `snshah open voice`, `snshah open menu`, `snshah open hints`                          |
+| Personal OneDrive   | `snshah drive connect personal`, `snshah drive mount personal`, `snshah drive folder personal`             |
+| Tenant submenus     | `snshah open studio outlook`, `snshah drive list research`, `snshah drive mount research`                  |
+| Agents              | `snshah agent claude\|codex\|local [directory]`                                                            |
+| Configuration       | `snshah config setup\|check\|edit`, `snshah config set-secret VARIABLE`, `snshah shell`                    |
 | Setup & Diagnostics | `snshah plan`, `snshah apply`, `snshah doctor --json`, `snshah workspace`, `snshah context`, `snshah test` |
-| Vault | `snshah vault status\|backup\|verify\|restore` |
-| Plugin | `snshah plugin install\|toggle\|remove` |
+| Vault               | `snshah vault status\|backup\|verify\|restore`                                                             |
+| Plugin              | `snshah plugin install\|toggle\|remove`                                                                    |
 
 The native menu is generated from the command table embedded in `snshah.ts`. Omarchy’s menu definition has a fixed JSONC path. Edit the TypeScript config for Workshop settings.
 
@@ -92,7 +92,7 @@ The bar shows a mount count, local AI state, and a backup-due marker. Hover for 
 
 ![Configuration submenu with VS Code, validation, and secret entry](docs/configuration.png)
 
-The only Workshop settings file is **`~/.config/snshah.conf.ts`**. Setup creates it with mode **0600**. You must own the file, and it must be a regular file. It contains executable TypeScript, so review it before loading a copy from another machine. The generated `snshah.auto.d.ts` exposes the config types to VS Code.
+The only Workshop settings file is **`~/.config/snshah.conf.ts`**. Setup creates it with mode **0600**. You must own the file, and it must be a regular file. It contains executable TypeScript, so review it before loading a copy from another machine. The generated `snshah.auto.d.ts` exposes the config types to VS Code. Workshop uses `bun fmt` for the private config, its type declarations, and its editor workspace. Use Bun 1.4.4 or newer.
 
 1. Open **Configuration → Edit in VS Code** and add tenants to the `work` array. A fresh install starts with an empty array. Use **Name my profiles** to rename entries you’ve already added. The screenshots use example tenants.
 2. Open **Configuration → Edit in VS Code** or run `snshah config edit`. This opens the private config in a dedicated VS Code window with format-on-save, autocomplete, and inline TypeScript diagnostics. See [Editing in VS Code](#editing-in-vs-code).
@@ -100,18 +100,18 @@ The only Workshop settings file is **`~/.config/snshah.conf.ts`**. Setup creates
 
 Configuration options include:
 
-| Setting | Values |
-| --- | --- |
-| `personal`, `work[].label` | Editable display names. |
-| `work[].id` | Stable, unique tenant ID. Use lowercase letters, digits, and hyphens, starting with a letter. |
-| `workspacesRoot` | Absolute path for managed checkouts |
-| `repository` | Default GitHub repository in `owner/name` form. Starts as `shah/workshop`. |
-| `browser` | `{ kind: "omarchy" }` or `{ kind: "edge-default" }` |
-| `prompt` | `{ kind: "starship" }` or `{ kind: "posh" }` using the bundled theme |
-| `localAI` | `{ kind: "off" }` or `{ kind: "ollama", model: "qwen3-coder:30b" }` |
-| `personalOneDrive` | A `username` and rclone `remote`. The defaults are your Linux login and `snshah-personal`. |
-| `work[].files` | `{ kind: "web" }` or `{ kind: "rclone", username: "example-work", remote: "example-remote" }` |
-| `accounts` | Service-specific sign-in hints. View them via **Open → Show private sign-in hints**. |
+| Setting                    | Values                                                                                        |
+| -------------------------- | --------------------------------------------------------------------------------------------- |
+| `personal`, `work[].label` | Editable display names.                                                                       |
+| `work[].id`                | Stable, unique tenant ID. Use lowercase letters, digits, and hyphens, starting with a letter. |
+| `workspacesRoot`           | Absolute path for managed checkouts                                                           |
+| `repository`               | Default GitHub repository in `owner/name` form. Starts as `shah/workshop`.                    |
+| `browser`                  | `{ kind: "omarchy" }` or `{ kind: "edge-default" }`                                           |
+| `prompt`                   | `{ kind: "starship" }` or `{ kind: "posh" }` using the bundled theme                          |
+| `localAI`                  | `{ kind: "off" }` or `{ kind: "ollama", model: "qwen3-coder:30b" }`                           |
+| `personalOneDrive`         | A `username` and rclone `remote`. The defaults are your Linux login and `snshah-personal`.    |
+| `work[].files`             | `{ kind: "web" }` or `{ kind: "rclone", username: "example-work", remote: "example-remote" }` |
+| `accounts`                 | Service-specific sign-in hints. View them via **Open → Show private sign-in hints**.          |
 
 In the generated TypeScript file, replace the empty `work` array in `preferences` with entries like these:
 
@@ -154,8 +154,13 @@ Declare credentials in the marked `secrets` array in your private config. Exampl
 
 ```ts
 const secrets = [
-  { "variable": "EXAMPLE_API_TOKEN", "value": "", "scope": "command", "commands": ["codex"] },
-  { "variable": "EXAMPLE_SHELL_TOKEN", "value": "", "scope": "shell" }
+  {
+    variable: "EXAMPLE_API_TOKEN",
+    value: "",
+    scope: "command",
+    commands: ["codex"],
+  },
+  { variable: "EXAMPLE_SHELL_TOKEN", value: "", scope: "shell" },
 ] satisfies WorkstationConfig["secrets"];
 ```
 
@@ -189,13 +194,12 @@ For a tenant, choose `files.kind: "rclone"` and provide a distinct `username` an
 
 Workshop setup configures both tools for routine engineering work inside the user's sandbox. Agents can inspect and edit project files, build, test, and use local Git without asking for routine permission. Provider sign-in and account access are separate.
 
-| Tool | Defaults added by setup |
-| --- | --- |
-| Codex | Workspace-write sandbox, outbound network access, and approval prompts set to `never` in `$CODEX_HOME/config.toml` (normally `~/.codex/config.toml`). |
+| Tool        | Defaults added by setup                                                                                                                                                                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Codex       | Workspace-write sandbox, outbound network access, and approval prompts set to `never` in `$CODEX_HOME/config.toml` (normally `~/.codex/config.toml`).                                                                                                                                                  |
 | Claude Code | Automatic file edits and automatic approval of sandboxed shell commands. The sandbox allows GitHub and npm domains and disallows unsandboxed fallback. Workshop installs `bubblewrap` and `socat` if needed. Settings live in `$CLAUDE_CONFIG_DIR/settings.json` (normally `~/.claude/settings.json`). |
 
 Setup fills unset defaults, preserves explicit settings, and adds the same routine-work guidance to the user-level Codex `AGENTS.md` and Claude Code `CLAUDE.md`. Start a new agent session after setup. Managed execution policies still govern the session.
-
 
 - `snshah open dot` opens ChatGPT Dot. Set up app connections in the intended ChatGPT workspace. [OpenAI Dot setup](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)
 - `snshah open herdr` uses Herdr Desktop when installed and falls back to native Herdr in a terminal. Use separate worktrees for agents that will edit concurrently.
@@ -204,7 +208,7 @@ Setup fills unset defaults, preserves explicit settings, and adds the same routi
 
 ## Enroll another PC for SSH
 
-Enrollment uses a short-lived SSH password prompt. The password is a one-time code displayed on the Workshop PC. Ordinary SSH uses the enrolled key.
+Enrollment uses a short-lived SSH password prompt. Enter the four-character code displayed on the Workshop PC at the password prompt. The code is case-insensitive and accepts up to five attempts. Ordinary SSH uses the enrolled key.
 
 1. **On the Workshop PC**, open **Workshop → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. Bun fetches the pinned SSH library on first use. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
 2. **On the new PC**, run the displayed `ssh -p PORT enroll@ADDRESS` command. Compare the fingerprint shown by SSH with the one displayed on the Workshop PC before accepting it, then enter the one-time code. Choose Windows PowerShell, macOS, or Linux / WSL. Follow the displayed commands in a second terminal and paste the single Ed25519 **public key** line into the enrollment session.
@@ -231,7 +235,10 @@ Verify checks the snapshot format and TypeScript syntax without running the rest
 
 ## Verify changes
 
+Run `bun fmt` before pushing to `main`, then check formatting and test the installer.
+
 ```bash
+bun fmt --check
 bun --no-env-file ./snshah.ts test
 bun --no-env-file ./snshah.ts test --published
 snshah plan --json
