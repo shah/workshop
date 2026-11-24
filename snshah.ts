@@ -30,6 +30,7 @@ type Command =
   | { kind: "test"; published: boolean }
   | { kind: "plan" | "apply"; json: boolean; features: Features }
   | { kind: "doctor"; json: boolean }
+  | { kind: "ssh"; action: "enroll" | "devices" | "revoke" | "enable"; device?: string }
   | { kind: "status"; details: boolean }
   | { kind: "shell"; shell: "bash" | "zsh" }
   | { kind: "open"; app: PersonalApp }
@@ -60,6 +61,7 @@ const data = process.env.XDG_DATA_HOME || join(home, ".local/share");
 const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
+const sshEnrollment = join(assetDir, "ssh-enrollment.auto.py");
 const product = "Shahid's Workstation";
 const defaultRepository = "shah/workshop";
 const defaultWorkspaceRoot = join(home, "Work");
@@ -284,6 +286,8 @@ const usage = `Usage: snshah <command>
   workspace [--workspaces-root PATH]
   test [--published]
   doctor [--json]
+  ssh enroll|devices|revoke [device]
+  ssh enable DEVICE
   shell [bash|zsh]
   open gmail|voice|cloudflare|unifi|whatsapp|discord|spotify|dot|herdr|menu|hints
   open TENANT [browser|outlook|calendar|teams|onedrive]
@@ -323,6 +327,9 @@ function parse(argv: string[]): Command {
       local: flags.has("--local-ai"), workspaceRoot: root,
     } };
   }
+  if (kind === "ssh" && member(["enroll", "devices", "revoke", "enable"], first) && !rest.length &&
+      (first === "enable" ? !!second : !second || first === "revoke"))
+    return { kind, action: first, device: second };
   if (kind === "test" && (!first || first === "--published") && !second) return { kind, published: !!first };
   if (kind === "status" && (!first || first === "--details") && !second) return { kind, details: !!first };
   if (kind === "doctor" && (!first || first === "--json") && !second) return { kind, json: !!first };
@@ -901,6 +908,11 @@ async function plan(features: Features): Promise<Step[]> {
     throw new Error(`Expected the workstation checkout at ${checkout}. Choose another --workspaces-root if this path is in use.`);
 
 
+  const enrollmentSource = await read(join(import.meta.dir, "ssh-enrollment.py")) ??
+    await read(join(checkoutPath(root), "ssh-enrollment.py")) ?? await read(sshEnrollment);
+  if (enrollmentSource === undefined) throw new Error("Run setup from the workshop checkout to install SSH enrollment.");
+  await file(sshEnrollment, enrollmentSource);
+
   if (current.prompt.kind === "posh") {
     const source = await read(join(import.meta.dir, "snshah.omp.json")) ??
       await read(join(checkout, "snshah.omp.json")) ?? await read(theme);
@@ -1262,6 +1274,7 @@ type MenuArgs =
   | ["agent", Agent] | ["drive", "list" | "mount" | "connect" | "folder", string]
   | ["config", "edit" | "check" | "setup" | "set-secret"]
   | ["vault", "status" | "backup" | "verify" | "restore"]
+  | ["ssh", "enroll" | "devices" | "revoke"]
   | ["plugin", "install" | "remove" | "toggle"];
 type MenuAction = { id: string; label: string; args: MenuArgs; terminal?: true };
 type MenuSection = { id: string; label: string; actions: MenuAction[] };
@@ -1302,6 +1315,11 @@ function menuSections(work: readonly Tenant[]): MenuSection[] {
       { id: "setup", label: "Name my profiles", args: ["config", "setup"], terminal: true },
       { id: "secret", label: "Set a declared secret", args: ["config", "set-secret"], terminal: true },
       { id: "shell", label: "Shell integration", args: ["shell"], terminal: true },
+    ] },
+    { id: "remote", label: "Remote Access", actions: [
+      { id: "enroll", label: "Enroll a device", args: ["ssh", "enroll"], terminal: true },
+      { id: "devices", label: "List enrolled devices", args: ["ssh", "devices"], terminal: true },
+      { id: "revoke", label: "Revoke a device", args: ["ssh", "revoke"], terminal: true },
     ] },
     { id: "setup", label: "Setup & Diagnostics", actions: [
       { id: "plan", label: "Preview changes", args: ["plan"], terminal: true },
@@ -1444,6 +1462,11 @@ async function execute(command: Command): Promise<void> {
       return;
     case "status": await workstationStatus(command.details); return;
     case "doctor": await doctor(command.json); return;
+    case "ssh": {
+      if (!await exists(sshEnrollment)) throw new Error("Run snshah apply from the Workshop checkout first.");
+      await run(["/usr/bin/python", "-I", sshEnrollment, command.action, ...(command.device ? [command.device] : [])]);
+      return;
+    }
     case "open": await openApp(command.app); return;
     case "work": await browser(urls[command.app], command.tenant, command.app !== "browser"); return;
     case "agent": await runAgent(command.agent, command.directory); return;
@@ -1607,6 +1630,8 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const freshConfig = await readFile(fixtureConf, "utf8");
     const settings = await interpretConfig(freshConfig);
     const menuFile = join(fixture, ".config/omarchy/extensions/omarchy-menu.jsonc");
+    assert.match(await readFile(menuFile, "utf8"), /Remote Access/);
+    assert.equal(invoke("snshah", "ssh", "devices"), "No devices enrolled through Workshop.\n");
     assert.deepEqual(settings.work, []);
     assert.equal(settings.repository, "shah/workshop");
     await writeFile(fixtureConf, configSource({ ...settings, repository: "example/another-repo" }));

@@ -184,6 +184,18 @@ For a tenant, choose `files.kind: "rclone"` and provide a distinct `username` an
 - `snshah agent claude /path/to/worktree` and `snshah agent codex /path/to/worktree` use your Omarchy-managed runtimes.
 - To run local OpenCode, set `localAI` to `ollama` in the config and run `snshah plan` and `snshah apply`. Then run `snshah agent local`.
 
+## Enroll another PC for SSH
+
+Enrollment uses a short-lived SSH password prompt. The password is a one-time code displayed on the Workshop PC. Ordinary SSH uses the enrolled key.
+
+1. **On the Workshop PC**, install the enrollment dependency once with `omarchy pkg add python-paramiko`. Open **Shahid’s Workstation → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
+2. **On the new PC**, run the displayed `ssh -p PORT enroll@ADDRESS` command. Compare the fingerprint shown by SSH with the one displayed on the Workshop PC before accepting it, then enter the one-time code. Choose Windows PowerShell, macOS, or Linux / WSL. Follow the displayed commands in a second terminal and paste the single Ed25519 **public key** line into the enrollment session.
+3. **Back on the Workshop PC**, check the pending key fingerprint and enter a device name such as `travel-laptop` to approve it. Press Enter to deny. The enrollment listener closes after the request finishes or the five-minute window expires.
+4. **If regular SSH has not been enabled yet**, run `snshah ssh enable travel-laptop` on the Workshop PC. This delegates to Omarchy’s native setup, which starts key-only OpenSSH and opens port 22 under Omarchy’s standard firewall policy. The command also prints the regular server fingerprints. For an existing SSH server, make sure it uses your account’s `~/.ssh/authorized_keys` and check its effective firewall and authentication settings.
+5. **On the new PC**, run the regular SSH command shown after approval. Verify the regular SSH host fingerprint when prompted. If you reused an existing key, point `ssh -i` at that key. For VS Code Remote SSH, connect to the same account, address, and identity.
+
+Use **Remote Access → List enrolled devices** or `snshah ssh devices` to see device names and fingerprints. To revoke a device, choose **Revoke a device** or run `snshah ssh revoke travel-laptop`. Revocation blocks new connections with that key. An open SSH session remains connected.
+
 ## Encrypted vault
 
 ![Vault submenu with backup, verify, and restore actions](docs/vault.png)
