@@ -148,6 +148,7 @@ type Step =
   | { kind: "directory"; path: string }
   | { kind: "mount"; id: string; path: string; remote: string }
   | { kind: "editor" }
+  | { kind: "ssh-server" }
   | { kind: "remove"; path: string; previous: string };
 
 const home = homedir();
@@ -157,7 +158,7 @@ const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
 const product = "Workshop";
-const cliVersion = "0.2.0";
+const cliVersion = "0.3.0";
 const defaultRepository = "shah/workshop";
 const defaultWorkspaceRoot = join(home, "Work");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
@@ -581,19 +582,17 @@ async function dispatchCli(
   command(ssh, "enroll", "➕", "Start a one-time enrollment").action(() =>
     dispatch({ kind: "ssh", action: "enroll" }),
   );
-  command(ssh, "devices", "💻", "List enrolled devices").action(() =>
-    dispatch({ kind: "ssh", action: "devices" }),
-  );
+  command(ssh, "devices", "💻", "List enrolled devices")
+    .alias("list")
+    .action(() => dispatch({ kind: "ssh", action: "devices" }));
   command(ssh, "revoke", "🗑️", "Revoke a device key")
     .argument("[device]")
     .action((device?: string) =>
       dispatch({ kind: "ssh", action: "revoke", device }),
     );
-  command(ssh, "enable", "🟢", "Enable regular key-only SSH")
-    .argument("<device>")
-    .action((device: string) =>
-      dispatch({ kind: "ssh", action: "enable", device }),
-    );
+  command(ssh, "enable", "🟢", "Enable regular key-only SSH").action(() =>
+    dispatch({ kind: "ssh", action: "enable" }),
+  );
 
   const drives = group("drive", "☁️", "Manage OneDrive connections");
   for (const [action, message] of [
@@ -1864,6 +1863,7 @@ async function plan(features: Features): Promise<Step[]> {
   validateConfig(current);
   const steps: Step[] = [];
   if (!available("code")) steps.push({ kind: "editor" });
+  if (!regularSshReady()) steps.push({ kind: "ssh-server" });
   async function file(
     path: string,
     content: string,
@@ -2447,6 +2447,9 @@ async function apply(features: Features, json: boolean): Promise<void> {
             );
           }
           break;
+        case "ssh-server":
+          await enableRegularSsh(json);
+          break;
         case "command":
           await run(step.argv, { quiet: json });
           break;
@@ -2516,6 +2519,8 @@ function stepLabel(step: Step): string {
       return `Wait for ${step.service}`;
     case "editor":
       return "omarchy install editor vscode";
+    case "ssh-server":
+      return "Enable key-only OpenSSH on port 22";
     case "mount":
       return `Mount OneDrive for ${step.id}`;
     case "directory":
@@ -2540,7 +2545,9 @@ function describe(steps: Step[]): Array<{ kind: string; target: string }> {
             ? "install-vscode"
             : step.kind === "directory"
               ? "onedrive-mount-directory"
-              : step.path,
+              : step.kind === "ssh-server"
+                ? "enable-ssh-server"
+                : step.path,
   }));
 }
 
@@ -3647,6 +3654,24 @@ interface EnrollmentClient {
   ): void;
 }
 
+function enrollmentHost(address: string, name = hostname()): string {
+  return /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(name)
+    ? name
+    : address;
+}
+
+function enrollmentSshCommands(
+  executable: string,
+  account: string,
+  host: string,
+  address: string,
+): string {
+  const primary = `${executable} ${account}@${host}`;
+  return host === address
+    ? primary
+    : `${primary}\nIf the hostname does not resolve: ${executable} ${account}@${address}`;
+}
+
 async function enrollSshDevice(directory: string): Promise<void> {
   if (process.getuid!() === 0 || !process.stdin.isTTY || !process.stdout.isTTY)
     throw new Error("Open enrollment from a regular user's local terminal.");
@@ -3664,6 +3689,7 @@ async function enrollSshDevice(directory: string): Promise<void> {
   const publicHostKey = utils.parseKey(hostKey.public);
   if (publicHostKey instanceof Error) throw publicHostKey;
   const subnet = enrollmentSubnet(choice.cidr!);
+  const host = enrollmentHost(choice.address);
   const code = Buffer.from(newEnrollmentCode());
   const account = userInfo().username;
   const controller = new AbortController();
@@ -3759,13 +3785,19 @@ async function enrollSshDevice(directory: string): Promise<void> {
                     send("\nPaste one valid ssh-ed25519 public key: ");
                     return;
                   }
+                  // Echo the validated key fields so a pasted comment cannot control the terminal.
+                  send(
+                    `\nPublic key received:\n  ssh-ed25519 ${submitted.key}\nFingerprint: ${submitted.fingerprint}\n\n` +
+                      `Go back to the Workshop PC (${host}). Match the fingerprint, then enter a device name such as travel-laptop to approve.\n` +
+                      "This terminal will show the result.\n",
+                  );
                   approval = (async () => {
                     say(
                       `Request from ${info.ip} for ${account}. Public key: ${submitted.fingerprint}`,
                       "pending",
                     );
                     const name = await enrollmentInput(
-                      "Enter a device name to approve, or press Enter to deny: ",
+                      "Enter a device name (for example, travel-laptop) to approve, or press Enter to deny: ",
                       controller.signal,
                     );
                     controller.signal.throwIfAborted();
@@ -3780,13 +3812,40 @@ async function enrollSshDevice(directory: string): Promise<void> {
                           "Use 1–40 letters, digits, underscores, dots, or hyphens.",
                         );
                       await authorizeDevice(directory, name, submitted.key);
+                      clearTimeout(timeout);
+                      if (!regularSshRunning()) {
+                        send(
+                          "\nKey saved. Starting regular key-only SSH on the Workshop PC.\n",
+                        );
+                        say("Starting regular key-only SSH.");
+                        try {
+                          await enableRegularSsh();
+                        } catch (error) {
+                          const retry = `Run snshah ssh enable on the Workshop PC, then reconnect.`;
+                          send(
+                            `\nThe key is enrolled. Regular SSH setup could not finish. ${retry}\n`,
+                          );
+                          stream.exit(1);
+                          stream.end();
+                          await Bun.sleep(150);
+                          throw new Error(
+                            `The key is enrolled. ${retry} ${errorMessage(error)}`,
+                          );
+                        }
+                      }
                       say(
-                        `Enrolled ${name}. Normal SSH account: ${account}@${choice.address}`,
+                        `Enrolled ${name}. Normal SSH account: ${account}@${host}`,
                         "success",
                       );
                       send(
-                        `\nApproved. Verify the normal SSH host fingerprint on first connection.\n  ssh -i "${workshopKeyPath}" ${account}@${choice.address}\n` +
-                          "If you reused a key, substitute its private key path.\n",
+                        "\nApproved. Verify the normal SSH host fingerprint on first connection.\n" +
+                          enrollmentSshCommands(
+                            `ssh -o IdentitiesOnly=yes -i "${workshopKeyPath}"`,
+                            account,
+                            host,
+                            choice.address,
+                          ) +
+                          "\nIf you reused a key, substitute its private key path.\n",
                       );
                       stream.exit(0);
                     }
@@ -3854,7 +3913,9 @@ async function enrollSshDevice(directory: string): Promise<void> {
       300_000,
     );
     accepting = true;
-    say(`On the new PC, run: ssh -p ${port} enroll@${choice.address}`);
+    say(
+      `On the new PC, run: ${enrollmentSshCommands(`ssh -p ${port}`, "enroll", host, choice.address)}`,
+    );
     say(
       `Verify this enrollment host fingerprint: ${sshFingerprint(publicHostKey.getPublicSSH())}`,
     );
@@ -3880,6 +3941,99 @@ async function enrollSshDevice(directory: string): Promise<void> {
   }
 }
 
+const workshopSshPolicyPath =
+  "/etc/ssh/sshd_config.d/05-workshop-key-only.conf";
+const workshopSshPolicy = [
+  "# Workshop defaults. Enroll a device to authorize its SSH key.",
+  "PubkeyAuthentication yes",
+  "AuthenticationMethods publickey",
+  "PasswordAuthentication no",
+  "KbdInteractiveAuthentication no",
+  "PermitRootLogin no",
+].join("\n");
+
+function regularSshRunning(): boolean {
+  return ["sshd.service", "sshd.socket"].some(
+    (unit) => capture(["systemctl", "is-active", unit]) === "active",
+  );
+}
+
+function regularSshReady(): boolean {
+  return (
+    regularSshRunning() &&
+    capture(["systemctl", "is-enabled", "sshd.service"]) === "enabled" &&
+    capture(["cat", workshopSshPolicyPath]) === workshopSshPolicy
+  );
+}
+
+async function enableRegularSsh(quiet = false): Promise<void> {
+  if (!available("sshd"))
+    await run(["omarchy", "pkg", "add", "openssh"], { quiet });
+  await run(["sudo", "ssh-keygen", "-A"], { quiet });
+
+  const previous = capture(["cat", workshopSshPolicyPath]);
+  if (previous !== undefined && previous !== workshopSshPolicy)
+    throw new Error(
+      `Review the existing SSH policy at ${workshopSshPolicyPath} before enabling Workshop SSH.`,
+    );
+
+  const scratch = await mkdtemp(join(tmpdir(), "workshop.auto.sshd-"));
+  const source = join(scratch, "sshd_config");
+  let created = false;
+  let validated = false;
+  try {
+    if (previous === undefined) {
+      await writeFile(source, workshopSshPolicy + "\n", { mode: 0o600 });
+      await run(["sudo", "install", "-Dm644", source, workshopSshPolicyPath], {
+        quiet,
+      });
+      created = true;
+    }
+
+    await run(["sudo", "sshd", "-t"], { quiet });
+    const effective = (await commandOutput(["sudo", "sshd", "-T"]))
+      .split("\n")
+      .map((line) => line.replace(/^\S+/, (option) => option.toLowerCase()));
+    const required = [
+      "port 22",
+      "pubkeyauthentication yes",
+      "authenticationmethods publickey",
+      "passwordauthentication no",
+      "kbdinteractiveauthentication no",
+      "permitrootlogin no",
+    ];
+    if (
+      !required.every((setting) => effective.includes(setting)) ||
+      !effective.some(
+        (line) =>
+          line.startsWith("authorizedkeysfile ") &&
+          line.split(/\s+/).includes(".ssh/authorized_keys"),
+      )
+    )
+      throw new Error(
+        "OpenSSH did not load the Workshop port, key file, and key-only settings. Check sshd_config and its drop-ins.",
+      );
+
+    validated = true;
+    if (available("ufw")) {
+      await run(["sudo", "ufw", "limit", "22/tcp", "comment", "omarchy-sshd"], {
+        quiet,
+      });
+      await run(["sudo", "ufw", "reload"], { quiet });
+    }
+    await run(["sudo", "systemctl", "enable", "sshd.service"], { quiet });
+    await run(["sudo", "systemctl", "reload-or-restart", "sshd.service"], {
+      quiet,
+    });
+  } catch (error) {
+    if (created && !validated)
+      await run(["sudo", "rm", "-f", workshopSshPolicyPath], { quiet });
+    throw error;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
 async function workshopSsh(
   command: Extract<Command, { kind: "ssh" }>,
 ): Promise<void> {
@@ -3891,31 +4045,21 @@ async function workshopSsh(
     say(`Revoked ${name}. Existing SSH sessions remain open.`, "success");
     return;
   }
+  if (command.action === "enable") {
+    if (!regularSshReady()) await enableRegularSsh();
+    say("Key-only OpenSSH is enabled on port 22.", "success");
+    for (const path of (await readdir("/etc/ssh")).sort()) {
+      if (/^ssh_host_.*_key\.pub$/.test(path))
+        await run(["ssh-keygen", "-lf", join("/etc/ssh", path)]);
+    }
+    return;
+  }
   const devices = (await readAuthorizedKeys(directory))
     .split("\n")
     .map(enrolledDevice)
     .filter((device) => device !== undefined);
-  if (command.action === "devices") {
-    if (!devices.length)
-      say("No devices enrolled through Workshop.", "pending");
-    for (const device of devices) say(`${device.name}  ${device.fingerprint}`);
-    return;
-  }
-  const device = devices.find((item) => item.name === command.device);
-  if (!device)
-    throw new Error(
-      "Enroll a device first, then run snshah ssh enable DEVICE.",
-    );
-  await run([
-    "omarchy",
-    "setup",
-    "security",
-    "sshd",
-    `--key=ssh-ed25519 ${device.key} ${enrolledKeyMarker}${device.name}`,
-  ]);
-  for (const path of (await readdir("/etc/ssh")).sort())
-    if (/^ssh_host_.*_key\.pub$/.test(path))
-      await run(["ssh-keygen", "-lf", join("/etc/ssh", path)]);
+  if (!devices.length) say("No devices enrolled through Workshop.", "pending");
+  for (const device of devices) say(`${device.name}  ${device.fingerprint}`);
 }
 
 async function execute(command: Command): Promise<void> {
@@ -4080,7 +4224,6 @@ async function selfTest(published: boolean): Promise<void> {
       "dirname",
       "mktemp",
       "rm",
-      "cat",
       "sleep",
       "jq",
       "find",
@@ -4091,6 +4234,36 @@ async function selfTest(published: boolean): Promise<void> {
       const path = Bun.which(command);
       if (path) await symlink(path, join(tools, command));
     }
+    await writeFile(
+      join(tools, "cat"),
+      `#!/bin/sh
+if [ "$1" = ${shellQuote(workshopSshPolicyPath)} ]; then exec /usr/bin/cat "$HOME/sshd.auto.policy"; fi
+exec /usr/bin/cat "$@"
+`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(tools, "systemctl"),
+      '#!/bin/sh\ntest -f "$HOME/sshd.auto.active" || exit 3\ncase "$1" in is-active) printf "active\\n";; is-enabled) printf "enabled\\n";; *) exit 2;; esac\n',
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(tools, "sudo"),
+      `#!/usr/bin/env bun
+import { appendFileSync, copyFileSync, existsSync, writeFileSync } from "node:fs";
+const args = Bun.argv.slice(2);
+const [tool, action] = args;
+const home = process.env.HOME;
+appendFileSync(home + "/sshd.auto.log", args.join(" ") + "\\n");
+if (tool === "install" && action === "-Dm644") copyFileSync(args[2], home + "/sshd.auto.policy");
+else if (tool === "sshd" && action === "-T") console.log("Port 22\\nPubkeyAuthentication yes\\nAuthenticationMethods publickey\\nPasswordAuthentication no\\nKbdInteractiveAuthentication no\\nPermitRootLogin no\\nAuthorizedKeysFile .ssh/authorized_keys");
+else if (tool === "systemctl" && action === "reload-or-restart") {
+  if (!existsSync(home + "/sshd.auto.policy") || existsSync(home + "/.ssh/authorized_keys")) process.exit(4);
+  writeFileSync(home + "/sshd.auto.active", "");
+} else if (!["ssh-keygen", "sshd", "ufw", "systemctl"].includes(tool)) process.exit(2);
+`,
+      { mode: 0o755 },
+    );
     const bashrc = 'alias gs="git status"\nexport USER_SETTING=kept\n';
     const agentConfig = '{"userSetting":true}\n';
     const bindings = "-- User bindings\n";
@@ -4163,6 +4336,8 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
       "fusermount3",
       "bwrap",
       "socat",
+      "sshd",
+      "ufw",
     ])
       await writeFile(join(tools, tool), "#!/bin/sh\nexit 0\n", {
         mode: 0o755,
@@ -4256,6 +4431,26 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert.equal(invoke("snshah", "-V"), `v${cliVersion}\n`);
     assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     assert.equal(invoke(...bootstrap), "No changes needed.\n");
+    assert.equal(
+      await readFile(join(fixture, "sshd.auto.policy"), "utf8"),
+      workshopSshPolicy + "\n",
+    );
+    assert(!(await exists(join(fixture, ".ssh/authorized_keys"))));
+    const sshLog = (await readFile(join(fixture, "sshd.auto.log"), "utf8"))
+      .trimEnd()
+      .split("\n");
+    assert.deepEqual(
+      sshLog.filter((line) => !line.startsWith("install ")),
+      [
+        "ssh-keygen -A",
+        "sshd -t",
+        "sshd -T",
+        "ufw limit 22/tcp comment omarchy-sshd",
+        "ufw reload",
+        "systemctl enable sshd.service",
+        "systemctl reload-or-restart sshd.service",
+      ],
+    );
     if (!published) {
       const candidateDirectory = join(fixture, "update.auto.source");
       const candidateArchive = join(fixture, "update.auto.tar.gz");
@@ -4419,7 +4614,7 @@ await Bun.write(output, Bun.file(process.env.HOME + "/update.auto.tar.gz"));
     );
     assert.equal((await stat(authorized)).mode & 0o777, 0o600);
     assert.equal(
-      invoke("snshah", "ssh", "devices"),
+      invoke("snshah", "ssh", "list"),
       `laptop  ${enrolledKey.fingerprint}\n`,
     );
     assert.match(invoke("snshah", "ssh", "revoke", "laptop"), /Revoked laptop/);
@@ -4434,6 +4629,23 @@ await Bun.write(output, Bun.file(process.env.HOME + "/update.auto.tar.gz"));
         [...code].every((character) => enrollmentAlphabet.includes(character)),
       );
     }
+    assert.equal(
+      enrollmentHost("192.168.11.3", "workshop.local"),
+      "workshop.local",
+    );
+    assert.equal(
+      enrollmentHost("192.168.11.3", "invalid hostname"),
+      "192.168.11.3",
+    );
+    assert.equal(
+      enrollmentSshCommands(
+        "ssh -p 2222",
+        "enroll",
+        "workshop.local",
+        "192.168.11.3",
+      ),
+      "ssh -p 2222 enroll@workshop.local\nIf the hostname does not resolve: ssh -p 2222 enroll@192.168.11.3",
+    );
     const subnet = enrollmentSubnet("192.168.11.3/24");
     assert.equal(subnet.cidr, "192.168.11.0/24");
     assert(

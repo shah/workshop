@@ -48,16 +48,17 @@ Run `snshah --help` for the full command list and `snshah ssh --help` for a comm
 
 Setup checks for existing apps and launchers before using Omarchy's installers. Run `snshah plan` to see what is missing.
 
-| Default                                            | Installation path                                                                          |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Bun                                                | `omarchy pkg add bun`, with `omarchy pkg aur add bun-bin` as fallback, before the CLI runs |
-| VS Code                                            | `omarchy install editor vscode` when `code` is missing                                     |
-| Microsoft Edge                                     | `omarchy install browser edge`, then `omarchy default browser edge`                        |
-| Oh My Posh                                         | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme                        |
-| age, Herdr, rclone, FUSE                           | `omarchy pkg add` when missing                                                             |
-| Spotify                                            | `omarchy install service spotify` if a client or web launcher is missing                   |
-| WhatsApp and Discord                               | Existing enabled launchers, or Omarchy web apps if missing or hidden                       |
-| Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`.                                     |
+| Default                                            | Installation path                                                                                                                     |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenSSH                                            | Workshop enables key-only OpenSSH on port 22 at installation and uses Omarchy’s standard rate-limited SSH rule when UFW is installed. |
+| Bun                                                | `omarchy pkg add bun`, with `omarchy pkg aur add bun-bin` as fallback, before the CLI runs                                            |
+| VS Code                                            | `omarchy install editor vscode` when `code` is missing                                                                                |
+| Microsoft Edge                                     | `omarchy install browser edge`, then `omarchy default browser edge`                                                                   |
+| Oh My Posh                                         | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme                                                                   |
+| age, Herdr, rclone, FUSE                           | `omarchy pkg add` when missing                                                                                                        |
+| Spotify                                            | `omarchy install service spotify` if a client or web launcher is missing                                                              |
+| WhatsApp and Discord                               | Existing enabled launchers, or Omarchy web apps if missing or hidden                                                                  |
+| Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`.                                                                                |
 
 Ollama and local OpenCode are opt-in. Setup creates the personal OneDrive mount directory and mounts an already-configured remote when available. First-time Microsoft sign-in remains interactive.
 
@@ -208,15 +209,15 @@ Setup fills unset defaults, preserves explicit settings, and adds the same routi
 
 ## Enroll another PC for SSH
 
-Enrollment uses a short-lived SSH password prompt. Enter the four-character code displayed on the Workshop PC at the password prompt. The code is case-insensitive and accepts up to five attempts. Ordinary SSH uses the enrolled key.
+Workshop setup starts key-only OpenSSH on port 22 and enables it at boot. Enroll a device to authorize its key for your account. Enrollment uses a short-lived SSH password prompt. Enter the four-character code displayed on the Workshop PC at the password prompt. The code is case-insensitive and accepts up to five attempts. Ordinary SSH uses the enrolled key.
 
 1. **On the Workshop PC**, open **Workshop → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. Bun fetches the pinned SSH library on first use. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
-2. **On the new PC**, run the displayed `ssh -p PORT enroll@ADDRESS` command. Compare the fingerprint shown by SSH with the one displayed on the Workshop PC before accepting it, then enter the one-time code. Choose Windows PowerShell, macOS, or Linux / WSL. Follow the displayed commands in a second terminal and paste the single Ed25519 **public key** line into the enrollment session.
-3. **Back on the Workshop PC**, check the pending key fingerprint and enter a device name such as `travel-laptop` to approve it. Press Enter to deny. The enrollment listener closes after the request finishes or the five-minute window expires.
-4. **If regular SSH has not been enabled yet**, run `snshah ssh enable travel-laptop` on the Workshop PC. This delegates to Omarchy’s native setup, which starts key-only OpenSSH and opens port 22 under Omarchy’s standard firewall policy. The command also prints the regular server fingerprints. For an existing SSH server, make sure it uses your account’s `~/.ssh/authorized_keys` and check its effective firewall and authentication settings.
-5. **On the new PC**, run the regular SSH command shown after approval. Verify the regular SSH host fingerprint when prompted. If you reused an existing key, point `ssh -i` at that key. For VS Code Remote SSH, connect to the same account, address, and identity.
+2. **On the new PC**, run the displayed `ssh -p PORT enroll@HOSTNAME` command. If the new PC cannot resolve the hostname, use the displayed LAN IP command. Compare the fingerprint shown by SSH with the one displayed on the Workshop PC before accepting it, then enter the one-time code. Choose Windows PowerShell, macOS, or Linux / WSL. Follow the displayed commands in a second terminal and paste the single Ed25519 **public key** line into the enrollment session. After you press Enter, the session shows the accepted key, its fingerprint, and the next step on the Workshop PC.
+3. **Back on the Workshop PC**, match the fingerprint shown on both screens and enter a device name such as `travel-laptop` to approve it. Press Enter to deny. The enrollment listener closes after the request finishes or the five-minute window expires.
+4. **If the regular SSH service was stopped**, enrollment starts it after approval. You can also run `snshah ssh enable` on the Workshop PC to enable regular SSH or display its host-key fingerprints.
+5. **On the new PC**, run the hostname-based SSH command shown after approval, or use the LAN IP fallback. Verify the regular SSH host fingerprint when prompted. If you reused an existing key, point `ssh -i` at that key. For VS Code Remote SSH, connect to the same account, address, and identity.
 
-Use **Remote Access → List enrolled devices** or `snshah ssh devices` to see device names and fingerprints. To revoke a device, choose **Revoke a device** or run `snshah ssh revoke travel-laptop`. Revocation blocks new connections with that key. An open SSH session remains connected.
+Use **Remote Access → List enrolled devices** or `snshah ssh list` to see device names and fingerprints. To revoke a device, choose **Revoke a device** or run `snshah ssh revoke travel-laptop`. Revocation blocks new connections with that key. An open SSH session remains connected.
 
 ## Encrypted vault
 
