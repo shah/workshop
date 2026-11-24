@@ -8,9 +8,36 @@ Use an Omarchy Quattro desktop with Lua-based Hyprland. Run setup as your regula
 
 ### A. Ask an agent
 
+#### Sign in from your phone
+
+Run the commands below in a terminal on the fresh Workshop PC, or in an SSH session into it. Complete the browser steps on your phone. This works without a browser on the Workshop PC, an SSH key for GitHub, or a credential file copied from another computer.
+
+1. **GitHub.** If `gh` is missing, install it with `omarchy pkg add github-cli`. Run:
+
+   ```sh
+   GH_BROWSER=true gh auth login --hostname github.com --git-protocol https --web
+   ```
+
+   Press Enter if prompted, then open [github.com/login/device](https://github.com/login/device) on your phone. Sign in to the GitHub account you want Workshop to use, enter the one-time code from the terminal, and approve GitHub CLI. Wait for the terminal to confirm sign-in, then configure Git to use that login and check its status:
+
+   ```sh
+   gh auth setup-git --hostname github.com
+   gh auth status --hostname github.com
+   ```
+
+2. **Codex.** On your phone, enable device code login in **ChatGPT → Settings → Security**. If you use a managed workspace, its administrator may need to enable it in workspace permissions. On the Workshop PC, run:
+
+   ```sh
+   codex login --device-auth
+   ```
+
+   Open the URL printed by Codex on your phone, sign in to the intended ChatGPT account, and enter the one-time code. Once the terminal reports success, run `codex login status`. [Codex device-code sign-in](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
+
+#### Run the setup prompt
+
 Open Codex, Claude Code, or your preferred agent harness on the Omarchy PC and give it this prompt:
 
-> Set up this Omarchy PC using https://github.com/shah/workshop. Read the README and AGENTS.md, preview the changes, then apply them. Fix recoverable errors and tell me when you need me at the keyboard for sudo or sign-in. Verify the setup by cloning a test repo and starting an available agent in it. Report what passed and what remains.
+> Set up this Omarchy PC using https://github.com/shah/workshop. Use my existing GitHub CLI sign-in. Read the README and AGENTS.md, preview the changes, then apply them. Fix recoverable errors and tell me if sudo needs my password or either sign-in check fails. Verify the setup by cloning a test repo and starting an available agent in it. Report what passed and what remains.
 
 ### B. Run the bootstrap
 
