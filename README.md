@@ -32,6 +32,29 @@ bun --no-env-file ./snshah.ts apply
 
 The default workspace root is `~/Work`. Set `workspacesRoot` in your private config or pass `--workspaces-root "$HOME/Client Work"` to preview or apply with a different root. On first installation, that flag seeds the config. The generated `repository` setting uses `shah/workshop` as the example. Run `snshah workspace` to print the configured checkout path.
 
+## Manage Git checkouts
+
+`snshah git` uses Git's SSH keys and credential helpers. The default checkout is the `repository` configured in `snshah.conf.ts`, initially `shah/workshop`. Additional checkouts are recorded in the same config under `repositories`. The normal root is `~/Work`.
+
+```sh
+snshah git add https://github.com/owner/api.git
+snshah git add git@gitlab.com:team/platform/backend.git
+snshah git add ssh://git@git.example.net:2222/team/frontend.git
+snshah git add /srv/git/tools.git
+snshah git add ./existing-checkout --in-place
+snshah git list
+snshah git list --json
+```
+
+Workshop uses `HOST/NAMESPACE/REPO` beneath the workspace root, including nested namespaces and nonstandard ports. Local sources go under `local/REPO`. A GitHub `owner/repo` shorthand also works. Use `--name NAME` to resolve naming collisions and `--path PATH` to choose a different checkout location. In-place registrations retain their original path.
+
+- `snshah git path NAME` prints a path for shell scripts or agent launchers.
+- `snshah git clone [NAME]` restores a missing managed checkout.
+- `snshah git update [NAME]` fast-forwards the current branch from its upstream on `origin`. Use `--all` to continue through the list and report failures. Dirty or divergent checkouts are left for you to resolve.
+- `snshah git remove NAME` removes an added repo from the config and leaves its files in place.
+
+Omit the name in `path`, `clone`, or `update` to use the default checkout. Use `snshah update` to update the Workshop CLI itself.
+
 ## Update Workshop
 
 Run `snshah --version` to see the installed CLI version. Workshop starts at `v0.1.0` and publishes a new [Semantic Version](https://semver.org/) on each push to `main`.

@@ -1,6 +1,7 @@
 #!/usr/bin/env -S bun --no-env-file
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { isIPv4 } from "node:net";
 import { constants } from "node:fs";
 import {
@@ -96,6 +97,7 @@ const agents = ["claude", "codex", "local"] as const;
 type Agent = (typeof agents)[number];
 type Features = { local: boolean; workspaceRoot?: string };
 type Command =
+  | GitCommand
   | { kind: "context" }
   | { kind: "update"; check: boolean; yes: boolean }
   | { kind: "workspace"; root?: string }
@@ -145,7 +147,7 @@ const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
 const product = "Workshop";
-const cliVersion = "0.5.0";
+const cliVersion = "0.6.0";
 const defaultRepository = "shah/workshop";
 const defaultWorkspaceRoot = join(home, "Work");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
@@ -523,6 +525,48 @@ async function dispatchCli(
         root: workspaceOption(options.workspacesRoot),
       }),
     );
+  const repos = group(
+    "git",
+    "📂",
+    "Manage Git repositories in the Workshop workspace",
+  );
+  command(repos, "add", "➕", "Clone and track a Git URL or local repository")
+    .argument("<source>")
+    .option("--name <name>", "Name in Workshop")
+    .option("--path <path>", "Override the checkout path")
+    .option("--in-place", "Track an existing local checkout without cloning")
+    .action(
+      (
+        source: string,
+        options: { name?: string; path?: string; inPlace?: boolean },
+      ) =>
+        dispatch({
+          kind: "git",
+          action: "add",
+          source,
+          ...options,
+          inPlace: !!options.inPlace,
+        }),
+    );
+  command(repos, "list", "📋", "List tracked repositories")
+    .option("--json", "Print structured output")
+    .action((options: { json?: boolean }) =>
+      dispatch({ kind: "git", action: "list", json: !!options.json }),
+    );
+  for (const [action, description] of [
+    ["path", "Print the checkout path"],
+    ["clone", "Clone a missing checkout"],
+    ["remove", "Stop tracking a repo and keep its files"],
+  ] as const)
+    command(repos, action, "📂", description)
+      .argument(action === "remove" ? "<name>" : "[name]")
+      .action((name?: string) => dispatch({ kind: "git", action, name }));
+  command(repos, "update", "🔄", "Fast-forward a checkout from its upstream")
+    .argument("[name]")
+    .option("--all", "Update all tracked repositories")
+    .action((name: string | undefined, options: { all?: boolean }) =>
+      dispatch({ kind: "git", action: "update", name, all: !!options.all }),
+    );
   command(program, "doctor", "🩺", "Inspect Workshop dependencies")
     .option("--json", "Print structured output")
     .action((options: { json?: boolean }) =>
@@ -895,7 +939,8 @@ const menuPath = join(home, ".config/omarchy/extensions/omarchy-menu.jsonc");
 const menuId = "shahid-workstation";
 const commandScopes = ["claude", "codex", "local", "drive"] as const;
 type Scope = (typeof commandScopes)[number];
-const configTypes = `export type Secret =
+const configTypes = `export type TrackedRepository = { name: string; source: string; path: string; inPlace?: boolean };
+export type Secret =
   | { variable: string; value: string; scope: "shell" }
   | { variable: string; value: string; scope: "command"; commands: readonly ("claude" | "codex" | "local" | "drive")[] };
 export type OneDriveProfile = { username: string; remote: string };
@@ -925,6 +970,7 @@ export type WorkstationConfig = {
   workspacesRoot: string;
   /** Default GitHub repository in owner/name form. */
   repository: string;
+  repositories?: readonly TrackedRepository[];
   prompt: { kind: "starship" } | { kind: "posh" };
   browser: { kind: "omarchy" } | { kind: "edge-default" };
   localAI: { kind: "off" } | { kind: "ollama"; model: string };
@@ -953,6 +999,7 @@ type WorkstationConfig = {
   work: readonly Tenant[];
   workspacesRoot: string;
   repository: string;
+  repositories?: readonly TrackedRepository[];
   prompt: { kind: "starship" } | { kind: "posh" };
   browser: { kind: "omarchy" } | { kind: "edge-default" };
   localAI: { kind: "off" } | { kind: "ollama"; model: string };
@@ -1081,6 +1128,7 @@ function validateConfig(v: unknown): asserts v is WorkstationConfig {
     throw new Error(
       "repository must be a GitHub owner/name without a .git suffix.",
     );
+  validateTrackedRepositories(v as WorkstationConfig);
   if (
     !object(v.prompt) ||
     !member(
@@ -1199,7 +1247,7 @@ function initialConfig(features?: Features): WorkstationConfig {
 }
 
 function configSource(settings: WorkstationConfig): string {
-  const { secrets, ...preferences } = settings;
+  const { secrets, repositories = [], ...preferences } = settings;
   return formatGeneratedConfig(
     conf,
     [
@@ -1209,7 +1257,8 @@ function configSource(settings: WorkstationConfig): string {
       `const secrets = ${JSON.stringify(secrets, null, 2)} satisfies WorkstationConfig["secrets"];`,
       endSecrets,
       `const preferences = ${JSON.stringify(preferences, null, 2)} satisfies Omit<WorkstationConfig, "secrets">;`,
-      "export default { ...preferences, secrets } satisfies WorkstationConfig;",
+      repositoryBlock(repositories),
+      "export default { ...preferences, secrets, repositories } satisfies WorkstationConfig;",
       "",
     ].join("\n"),
   );
@@ -1408,7 +1457,10 @@ function matchesRepository(
 }
 
 async function createCheckout(path: string, repository: string): Promise<void> {
-  const remote = `https://github.com/${repository}.git`;
+  await cloneGitSource(path, `https://github.com/${repository}.git`);
+}
+
+async function cloneGitSource(path: string, remote: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const staging = await mkdtemp(
     join(dirname(path), ".workstation.auto.clone-"),
@@ -1420,6 +1472,384 @@ async function createCheckout(path: string, repository: string): Promise<void> {
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+type TrackedRepository = {
+  name: string;
+  source: string;
+  path: string;
+  inPlace?: boolean;
+};
+type GitCommand =
+  | {
+      kind: "git";
+      action: "add";
+      source: string;
+      name?: string;
+      path?: string;
+      inPlace: boolean;
+    }
+  | { kind: "git"; action: "list"; json: boolean }
+  | { kind: "git"; action: "path" | "clone" | "remove"; name?: string }
+  | { kind: "git"; action: "update"; name?: string; all: boolean };
+
+const beginRepositories = "// >>> snshah repositories >>>";
+const endRepositories = "// <<< snshah repositories <<<";
+
+function repoName(value: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]{0,99}$/i.test(value);
+}
+
+function parseGitSource(
+  source: string,
+  cwd = process.cwd(),
+): {
+  source: string;
+  identity: string;
+  segments: string[];
+  local: boolean;
+} {
+  if (!source || /[\x00-\x1f\x7f]/.test(source))
+    throw new Error("Supply a valid Git URL or local repository path.");
+  const localPath = (path: string) => {
+    const absolute = resolve(cwd, path);
+    const name = basename(absolute).replace(/\.git$/i, "");
+    if (!name || name === "." || name === "..")
+      throw new Error("Supply a local repository directory.");
+    return {
+      source: absolute,
+      identity: absolute,
+      segments: ["local", name],
+      local: true,
+    };
+  };
+  if (source.startsWith("file://")) return localPath(fileURLToPath(source));
+  if (!source.includes("://") && !/^(?:[^@/:]+@)?[^/:]+:/.test(source))
+    return localPath(source);
+
+  const scp =
+    !source.includes("://") &&
+    /^(?:[a-z0-9_.-]+@)?([a-z0-9.-]+):(.+)$/i.exec(source);
+  const url = scp ? undefined : new URL(source);
+  if (
+    url &&
+    (!member(["https:", "http:", "ssh:", "git:"], url.protocol) ||
+      url.password ||
+      (url.username && url.protocol !== "ssh:") ||
+      url.search ||
+      url.hash)
+  )
+    throw new Error(
+      "Use an HTTPS, SSH, Git, or local source without embedded credentials or URL parameters.",
+    );
+  const host = (scp ? scp[1] : url!.hostname).toLowerCase();
+  if (!/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host))
+    throw new Error("Use a DNS hostname or IPv4 address for the Git remote.");
+  const port = url?.port === "22" && url.protocol === "ssh:" ? "" : url?.port;
+  const rawPath = scp ? scp[2] : url!.pathname;
+  if (/(?:^|\/)(?:\.|\.\.)(?:\/|$)/.test(rawPath))
+    throw new Error("A Git remote path cannot include dot segments.");
+  const parts = rawPath
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .map(decodeURIComponent);
+  parts[parts.length - 1] = parts.at(-1)!.replace(/\.git$/i, "");
+  if (
+    parts.some(
+      (part) =>
+        !part ||
+        part === "." ||
+        part === ".." ||
+        /[\\/\x00-\x1f\x7f]/.test(part),
+    )
+  )
+    throw new Error("A Git remote must include a valid repository path.");
+  const server = port ? `${host}:${port}` : host;
+  const remotePath = parts.join("/");
+  return {
+    source,
+    identity: `${server}/${host === "github.com" ? remotePath.toLowerCase() : remotePath}`,
+    segments: [server, ...parts],
+    local: false,
+  };
+}
+
+function trackedRepositories(config: WorkstationConfig): TrackedRepository[] {
+  const primary = {
+    name: config.repository.split("/").at(-1)!,
+    source: `https://github.com/${config.repository}.git`,
+    path: checkoutPath(config.workspacesRoot, config.repository),
+  };
+  return [primary, ...(config.repositories ?? [])];
+}
+
+function validateTrackedRepositories(config: WorkstationConfig) {
+  if (config.repositories !== undefined && !Array.isArray(config.repositories))
+    throw new Error("repositories must be an array of Git checkouts.");
+  const names = new Set<string>();
+  const paths = new Set<string>();
+  for (const entry of trackedRepositories(config)) {
+    if (
+      !object(entry) ||
+      typeof entry.name !== "string" ||
+      !repoName(entry.name) ||
+      typeof entry.source !== "string" ||
+      typeof entry.path !== "string" ||
+      !isAbsolute(entry.path) ||
+      /[\x00-\x1f\x7f]/.test(entry.path) ||
+      (entry.inPlace !== undefined && typeof entry.inPlace !== "boolean")
+    )
+      throw new Error(
+        "Each tracked repository needs a name, Git source, and absolute checkout path.",
+      );
+    const source = parseGitSource(entry.source);
+    if (source.source !== entry.source)
+      throw new Error("Use an absolute path for local Git sources.");
+    const path = resolve(entry.path);
+    const name = entry.name.toLowerCase();
+    if (paths.has(path) || names.has(name))
+      throw new Error(
+        "Tracked Git repositories must have unique names and checkout paths.",
+      );
+    names.add(name);
+    paths.add(path);
+  }
+}
+
+async function gitCheckoutState(
+  repo: TrackedRepository,
+): Promise<"cloned" | "missing" | "origin mismatch"> {
+  if (!(await exists(repo.path))) return "missing";
+  if (!(await exists(join(repo.path, ".git")))) return "origin mismatch";
+  const origin = capture([
+    "git",
+    "-C",
+    repo.path,
+    "config",
+    "--get",
+    "remote.origin.url",
+  ]);
+  try {
+    const expected = parseGitSource(repo.source);
+    if (!origin)
+      return repo.inPlace && expected.identity === resolve(repo.path)
+        ? "cloned"
+        : "origin mismatch";
+    return parseGitSource(origin, repo.path).identity === expected.identity
+      ? "cloned"
+      : "origin mismatch";
+  } catch {
+    return "origin mismatch";
+  }
+}
+
+async function cloneTrackedRepository(repo: TrackedRepository): Promise<void> {
+  const state = await gitCheckoutState(repo);
+  if (state === "cloned") return;
+  if (state === "origin mismatch")
+    throw new Error(`Unexpected Git origin or checkout at ${repo.path}.`);
+  if (repo.inPlace)
+    throw new Error(
+      `Restore the in-place checkout at ${repo.path} before using it.`,
+    );
+  await cloneGitSource(repo.path, repo.source);
+}
+
+function repositoryBlock(repositories: readonly TrackedRepository[]): string {
+  return [
+    beginRepositories,
+    "// The default GitHub repository is set by preferences.repository.",
+    `const repositories = ${JSON.stringify(repositories, null, 2)} satisfies NonNullable<WorkstationConfig["repositories"]>;`,
+    endRepositories,
+  ].join("\n");
+}
+
+async function saveTrackedRepositories(
+  text: string,
+  current: WorkstationConfig,
+  repositories: TrackedRepository[],
+): Promise<void> {
+  const block = repositoryBlock(repositories);
+  let source = text;
+  if (!text.includes(beginRepositories) && !text.includes(endRepositories)) {
+    const original =
+      /\bexport default\s*\{\s*\.\.\.preferences,\s*secrets,?\s*\}\s*satisfies\s+WorkstationConfig\s*;/;
+    if (current.repositories !== undefined || !original.test(source))
+      throw new Error(
+        "Edit repositories in the private config directly. The Git CLI needs the generated repository block.",
+      );
+    source = source.replace(
+      original,
+      "export default { ...preferences, secrets, repositories } satisfies WorkstationConfig;",
+    );
+    source = block + "\n" + source;
+  } else {
+    source = upsertBlock(source, beginRepositories, endRepositories, block);
+  }
+  const next = formatGeneratedConfig(conf, source);
+  assert.deepEqual(
+    await interpretConfig(next),
+    { ...current, repositories },
+    "Repository edits must preserve other settings.",
+  );
+  if ((await privateConfigBytes()) !== text)
+    throw new Error(
+      "Workshop config changed while Git was running. Retry the command.",
+    );
+  await atomicFile(conf, next, 0o600);
+}
+
+async function updateTrackedRepository(repo: TrackedRepository): Promise<void> {
+  await cloneTrackedRepository(repo);
+  const git = ["git", "-C", repo.path];
+  const status = await commandOutput([...git, "status", "--porcelain"]);
+  if (status.trim()) throw new Error("The checkout has local changes.");
+  const branch = capture([
+    ...git,
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    "HEAD",
+  ]);
+  if (
+    !branch ||
+    capture([...git, "config", "--get", `branch.${branch}.remote`]) !==
+      "origin" ||
+    !capture([...git, "rev-parse", "--verify", "@{upstream}"])
+  )
+    throw new Error("The current branch needs an upstream on origin.");
+  await run([...git, "pull", "--ff-only"]);
+}
+
+async function editGitRegistry(
+  command:
+    | Extract<GitCommand, { action: "add" }>
+    | { kind: "git"; action: "remove"; name?: string },
+): Promise<void> {
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  const lock = join(profileDir, "git.auto.lock");
+  try {
+    await mkdir(lock, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST")
+      throw new Error(`Git configuration is locked at ${lock}.`);
+    throw error;
+  }
+  try {
+    const text = await privateConfigBytes();
+    const config = await interpretConfig(text);
+    const current = [...(config.repositories ?? [])];
+    if (command.action === "add") {
+      if (command.inPlace && command.path)
+        throw new UsageError("Choose either --in-place or --path.");
+      const input = workspaceOption(command.source)!;
+      const shorthand =
+        /^[a-z0-9_-]+\/[a-z0-9_.-]+$/i.test(command.source) &&
+        !(await exists(input));
+      const supplied = parseGitSource(
+        shorthand && !command.inPlace
+          ? `https://github.com/${command.source.replace(/\.git$/i, "")}.git`
+          : command.source.startsWith("~/")
+            ? input
+            : command.source,
+      );
+      if (command.inPlace && !supplied.local)
+        throw new UsageError("--in-place requires a local checkout path.");
+      if (command.inPlace && !(await exists(join(input, ".git"))))
+        throw new Error(`No Git checkout found at ${input}.`);
+      const origin = command.inPlace
+        ? capture(["git", "-C", input, "config", "--get", "remote.origin.url"])
+        : undefined;
+      const entry: TrackedRepository = {
+        name: command.name ?? supplied.segments.at(-1)!,
+        source: origin ? parseGitSource(origin, input).source : supplied.source,
+        path: command.inPlace
+          ? input
+          : (workspaceOption(command.path) ??
+            join(config.workspacesRoot, ...supplied.segments)),
+        ...(command.inPlace ? { inPlace: true } : {}),
+      };
+      validateTrackedRepositories({
+        ...config,
+        repositories: [...current, entry],
+      });
+      await cloneTrackedRepository(entry);
+      await saveTrackedRepositories(text, config, [...current, entry]);
+      say(`Tracking ${entry.name} · ${entry.path}`, "success");
+    } else {
+      const entry = current.find(
+        (repo) => repo.name.toLowerCase() === command.name?.toLowerCase(),
+      );
+      if (!entry)
+        throw new Error(
+          "Choose an added repository from snshah git list. Set the default through preferences.repository.",
+        );
+      await saveTrackedRepositories(
+        text,
+        config,
+        current.filter((repo) => repo !== entry),
+      );
+      say(
+        `Removed ${entry.name} from Workshop. Checkout kept at ${entry.path}.`,
+        "success",
+      );
+    }
+  } finally {
+    await rm(lock, { recursive: true, force: true });
+  }
+}
+
+async function workshopGit(command: GitCommand): Promise<void> {
+  if (command.action === "add" || command.action === "remove")
+    return editGitRegistry(
+      command.action === "add"
+        ? command
+        : { kind: "git", action: "remove", name: command.name },
+    );
+  const entries = trackedRepositories(await settings());
+  if (command.action === "list") {
+    const rows = await Promise.all(
+      entries.map(async (repo) => ({
+        ...repo,
+        state: await gitCheckoutState(repo),
+      })),
+    );
+    if (command.json) print(rows, true);
+    else
+      for (const row of rows)
+        say(`${row.name} · ${row.state} · ${row.path}\n  ${row.source}`);
+    return;
+  }
+  if (command.action === "update" && command.all && command.name)
+    throw new UsageError("Choose either a repo name or --all.");
+  const selected = command.name
+    ? entries.find(
+        (repo) => repo.name.toLowerCase() === command.name!.toLowerCase(),
+      )
+    : entries[0];
+  if (!selected) throw new Error("Unknown repository. Use snshah git list.");
+  if (command.action === "path") {
+    console.log(selected.path);
+    return;
+  }
+  if (command.action === "clone") {
+    await cloneTrackedRepository(selected);
+    say(`Checkout ready · ${selected.path}`, "success");
+    return;
+  }
+  let failed = false;
+  for (const repo of command.action === "update" && command.all
+    ? entries
+    : [selected]) {
+    try {
+      await updateTrackedRepository(repo);
+      say(`Checked for updates · ${repo.name}`, "success");
+    } catch (error) {
+      failed = true;
+      console.error(styled(`${repo.name}: ${errorMessage(error)}`, "error"));
+    }
+  }
+  if (failed) process.exitCode = 1;
 }
 
 function appEntries(work: readonly Tenant[]) {
@@ -3538,6 +3968,9 @@ async function enableRegularSsh(
 
 async function execute(command: Command): Promise<void> {
   switch (command.kind) {
+    case "git":
+      await workshopGit(command);
+      return;
     case "update":
       await updateWorkshop(command);
       return;
@@ -3809,7 +4242,7 @@ else if (group === "webapp" && action === "install") {
       `#!/usr/bin/env bun
 import { mkdirSync } from "node:fs";
 const argv = Bun.argv.slice(2);
-if (argv[0] === "clone") mkdirSync(argv.at(-1) + "/.git", { recursive: true });
+if (argv[0] === "clone" && argv[2]?.startsWith("https://github.com/")) mkdirSync(argv.at(-1) + "/.git", { recursive: true });
 else if (argv[0] === "-C" && argv[2] === "remote") console.log("https://github.com/shah/workshop.git");
 else if (argv[0] === "ls-remote" && argv.length === 4) console.log("0123456789abcdef0123456789abcdef01234567\trefs/heads/main");
 else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdout: "inherit", stderr: "inherit" }).exitCode ?? 1;
@@ -4115,6 +4548,112 @@ await Bun.write(output, Bun.file(process.env.HOME + "/update.auto.tar.gz"));
         subnet: "192.168.11.0/24",
       }),
     );
+    assert.deepEqual(
+      parseGitSource("git@gitlab.com:team/platform/api.git").segments,
+      ["gitlab.com", "team", "platform", "api"],
+    );
+    assert.deepEqual(
+      parseGitSource("ssh://git@git.example.net:2222/team/api.git").segments,
+      ["git.example.net:2222", "team", "api"],
+    );
+    assert.equal(
+      parseGitSource("git@github.com:shah/workshop.git").identity,
+      parseGitSource("https://github.com/shah/Workshop.git").identity,
+    );
+    assert.throws(() =>
+      parseGitSource("https://user:token@git.example.net/team/api.git"),
+    );
+    const localRepo = join(fixture, "local-source");
+    invoke("git", "init", "--initial-branch=main", localRepo);
+    await writeFile(join(localRepo, "notes.txt"), "first\n");
+    invoke("git", "-C", localRepo, "add", "notes.txt");
+    const commitLocal = () =>
+      invoke(
+        "git",
+        "-C",
+        localRepo,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-m",
+        "Fixture",
+      );
+    commitLocal();
+    const previousRegistry =
+      freshConfig
+        .replace(
+          /\/\/ >>> snshah repositories >>>[\s\S]*?\/\/ <<< snshah repositories <<<\n/,
+          "",
+        )
+        .replace(/^  repositories,\n/m, "") +
+      "\n// Keep this private comment\n";
+    await writeFile(fixtureConf, previousRegistry);
+    const localPath = join(root, "local/local-source");
+    assert.match(
+      invoke("snshah", "git", "add", localRepo),
+      /Tracking local-source/,
+    );
+    const gitRows = JSON.parse(invoke("snshah", "git", "list", "--json"));
+    assert(
+      gitRows.some(
+        (row: { name: string; path: string; state: string }) =>
+          row.name === "local-source" &&
+          row.path === localPath &&
+          row.state === "cloned",
+      ),
+    );
+    assert.equal(
+      invoke("snshah", "git", "path", "local-source"),
+      localPath + "\n",
+    );
+    assert(
+      (await readFile(fixtureConf, "utf8")).includes(
+        "// Keep this private comment",
+      ),
+    );
+    assert.equal((await stat(fixtureConf)).mode & 0o777, 0o600);
+    await writeFile(join(localRepo, "notes.txt"), "second\n");
+    invoke("git", "-C", localRepo, "add", "notes.txt");
+    commitLocal();
+    await writeFile(join(localPath, "scratch.txt"), "uncommitted\n");
+    const dirtyUpdate = Bun.spawnSync(
+      ["snshah", "git", "update", "local-source"],
+      { env, cwd: source },
+    );
+    assert.equal(dirtyUpdate.exitCode, 1);
+    assert.match(dirtyUpdate.stderr.toString(), /local changes/);
+    assert.equal(
+      await readFile(join(localPath, "notes.txt"), "utf8"),
+      "first\n",
+    );
+    await rm(join(localPath, "scratch.txt"));
+    invoke("snshah", "git", "update", "local-source");
+    assert.equal(
+      await readFile(join(localPath, "notes.txt"), "utf8"),
+      "second\n",
+    );
+    await rm(localPath, { recursive: true });
+    invoke("snshah", "git", "clone", "local-source");
+    invoke("snshah", "git", "remove", "local-source");
+    assert(await exists(join(localPath, ".git")));
+    assert.match(
+      invoke(
+        "snshah",
+        "git",
+        "add",
+        localRepo,
+        "--in-place",
+        "--name",
+        "source",
+      ),
+      /Tracking source/,
+    );
+    assert.equal(invoke("snshah", "git", "path", "source"), localRepo + "\n");
+    invoke("snshah", "git", "remove", "source");
+    assert(await exists(join(localRepo, ".git")));
+    await writeFile(fixtureConf, freshConfig);
     assert.deepEqual(settings.work, []);
     assert.equal(settings.repository, "shah/workshop");
     await writeFile(
