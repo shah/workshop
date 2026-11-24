@@ -2,10 +2,6 @@
 
 Set up an Omarchy PC as a home for AI agents to clone repositories and run the jobs you assign, from the desktop or remotely. The workshop also includes desktop integrations for mail, Microsoft 365, OneDrive, and ChatGPT Dot.
 
-![The workstation status widget in the Omarchy bar](docs/bar.png)
-
-![The workstation submenu with example tenants](docs/menu.png)
-
 ## Set up a fresh Omarchy PC
 
 Use an Omarchy Quattro desktop with Lua-based Hyprland. Run setup as your regular desktop user. Package installation and system services may ask for sudo.
@@ -53,11 +49,11 @@ Setup checks for existing apps and launchers before using Omarchy's installers. 
 
 Ollama and local OpenCode are opt-in. Setup creates the personal OneDrive mount directory and mounts an already-configured remote when available. First-time Microsoft sign-in remains interactive.
 
-## Open the workstation menu
+## Open the Workshop menu
 
-- **Super + Alt + Space → Shahid’s Workstation** opens the submenu from Omarchy’s root menu.
+- **Super + Alt + Space → Workshop** opens the submenu from Omarchy’s root menu.
 - **Super + Alt + M** or `snshah menu` opens it directly. Check `omarchy menu keybindings --print` if you already use the shortcut.
-- `snshah plugin install` adds the optional **Shahid’s Workstation** status widget to the right side of the native bar. `snshah plugin toggle` opens the workstation menu and `snshah plugin remove` removes the widget. The native root menu entry stays available. The plugin is bundled here and installed locally.
+- `snshah plugin install` adds the optional **Workshop** status widget to the right side of the native bar. `snshah plugin toggle` opens the Workshop menu and `snshah plugin remove` removes the widget. The native root menu entry stays available. The plugin is bundled here and installed locally. Run `snshah plugin install` again to refresh an existing widget.
 
 Use the arrow keys and Enter, or type to filter. Each configured tenant gets a submenu, numbered in config order. **Open → Accounts by name** reads private display names at runtime. The generated Omarchy menu file uses generic titles. Agent sessions, mounts, vault passphrases, and secret entry open in an Omarchy terminal. **Setup & Diagnostics → Apply changes** previews the changes and asks for confirmation.
 
@@ -72,13 +68,11 @@ Use the arrow keys and Enter, or type to filter. Each configured tenant gets a s
 | Vault | `snshah vault status\|backup\|verify\|restore` |
 | Plugin | `snshah plugin install\|toggle\|remove` |
 
-The native menu is generated from the command table embedded in `snshah.ts`. Omarchy’s menu definition has a fixed JSONC path. Edit the TypeScript config for workstation settings.
+The native menu is generated from the command table embedded in `snshah.ts`. Omarchy’s menu definition has a fixed JSONC path. Edit the TypeScript config for Workshop settings.
 
-## Workstation status bar
+## Workshop status bar
 
-![The Omarchy workstation panel with example mount states](docs/panel.png)
-
-Click the widget for OneDrive mount status, the local Ollama state and model, agent shortcuts, and **Back up config**. The **Apps and accounts** picker includes your communication apps, cloud admin tools, ChatGPT Dot, and configured work accounts. Right-click the widget to open the full workstation menu. In the panel, use arrows and Enter to choose an action, and Escape to close it.
+Click the widget for OneDrive mount status, the local Ollama state and model, agent shortcuts, and **Back up config**. The **Apps and accounts** picker includes your communication apps, cloud admin tools, ChatGPT Dot, and configured work accounts. Right-click the widget to open the full Workshop menu. In the panel, use arrows and Enter to choose an action, and Escape to close it.
 
 The bar shows a mount count, local AI state, and a backup-due marker. Hover for the full status. The panel resolves display labels only while open. `snshah status` returns the compact state as JSON. `snshah status --details` includes drive labels and mount states. These checks use local mount and remote registration data, so **Ready to mount** means the remote is configured. An expired Microsoft session may still need reconnection. Omarchy’s native Agents and Media widgets remain available for usage and playback.
 
@@ -86,7 +80,7 @@ The bar shows a mount count, local AI state, and a backup-due marker. Hover for 
 
 ![Configuration submenu with VS Code, validation, and secret entry](docs/configuration.png)
 
-The only workstation settings file is **`~/.config/snshah.conf.ts`**. Setup creates it with mode **0600**. You must own the file, and it must be a regular file. It contains executable TypeScript, so review it before loading a copy from another machine. The generated `snshah.auto.d.ts` exposes the config types to VS Code.
+The only Workshop settings file is **`~/.config/snshah.conf.ts`**. Setup creates it with mode **0600**. You must own the file, and it must be a regular file. It contains executable TypeScript, so review it before loading a copy from another machine. The generated `snshah.auto.d.ts` exposes the config types to VS Code.
 
 1. Open **Configuration → Edit in VS Code** and add tenants to the `work` array. A fresh install starts with an empty array. Use **Name my profiles** to rename entries you’ve already added. The screenshots use example tenants.
 2. Open **Configuration → Edit in VS Code** or run `snshah config edit`. This opens the private config in a dedicated VS Code window with format-on-save, autocomplete, and inline TypeScript diagnostics. See [Editing in VS Code](#editing-in-vs-code).
@@ -136,7 +130,7 @@ Google Voice, Spotify, and Discord accept a `username` hint. A work tenant can a
 Setup installs Visual Studio Code through Omarchy when `code` is missing. Open the private file through **Configuration → Edit in VS Code** or `snshah config edit` to get the dedicated workspace and save notifications. The generated workspace keeps the rest of `~/.config` out of the Explorer. The repo also includes [.vscode defaults](.vscode) for its own checkout.
 
 - Save with **Ctrl+S** to format the file. VS Code’s built-in TypeScript support provides syntax coloring, completion, hover help, and errors for invalid types or tagged choices. Use **Ctrl+Shift+M** to open the Problems panel.
-- Run **Tasks: Run Task → Check workstation config** for runtime checks such as duplicate tenant IDs, invalid secret declarations, and file permissions. VS Code may ask you to trust the local workspace before running the task. The task is started manually.
+- Run **Tasks: Run Task → Check Workshop config** for runtime checks such as duplicate tenant IDs, invalid secret declarations, and file permissions. VS Code may ask you to trust the local workspace before running the task. The task is started manually.
 - After a valid change, choose **Back Up Now** in the notification or **Vault → Back up now**. The private workspace disables auto-save, local history, and hot-exit backups.
 - The [official Bun extension](https://marketplace.visualstudio.com/items?itemName=oven.bun-vscode) is recommended in both workspaces. The built-in formatting and config diagnostics work without it.
 
@@ -188,7 +182,7 @@ For a tenant, choose `files.kind: "rclone"` and provide a distinct `username` an
 
 Enrollment uses a short-lived SSH password prompt. The password is a one-time code displayed on the Workshop PC. Ordinary SSH uses the enrolled key.
 
-1. **On the Workshop PC**, install the enrollment dependency once with `omarchy pkg add python-paramiko`. Open **Shahid’s Workstation → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
+1. **On the Workshop PC**, install the enrollment dependency once with `omarchy pkg add python-paramiko`. Open **Workshop → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
 2. **On the new PC**, run the displayed `ssh -p PORT enroll@ADDRESS` command. Compare the fingerprint shown by SSH with the one displayed on the Workshop PC before accepting it, then enter the one-time code. Choose Windows PowerShell, macOS, or Linux / WSL. Follow the displayed commands in a second terminal and paste the single Ed25519 **public key** line into the enrollment session.
 3. **Back on the Workshop PC**, check the pending key fingerprint and enter a device name such as `travel-laptop` to approve it. Press Enter to deny. The enrollment listener closes after the request finishes or the five-minute window expires.
 4. **If regular SSH has not been enabled yet**, run `snshah ssh enable travel-laptop` on the Workshop PC. This delegates to Omarchy’s native setup, which starts key-only OpenSSH and opens port 22 under Omarchy’s standard firewall policy. The command also prints the regular server fingerprints. For an existing SSH server, make sure it uses your account’s `~/.ssh/authorized_keys` and check its effective firewall and authentication settings.

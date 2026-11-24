@@ -62,7 +62,7 @@ const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
 const sshEnrollment = join(assetDir, "ssh-enrollment.auto.py");
-const product = "Shahid's Workstation";
+const product = "Workshop";
 const defaultRepository = "shah/workshop";
 const defaultWorkspaceRoot = join(home, "Work");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
@@ -72,14 +72,14 @@ const pluginFiles = {
   "manifest.json": `{
   "schemaVersion": 1,
   "id": "shah.workstation",
-  "name": "Shahid's Workstation",
+  "name": "Workshop",
   "version": "0.2.0",
   "author": "shah",
-  "description": "Workstation shortcuts and local Ollama status",
+  "description": "Workshop shortcuts and local Ollama status",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "Panel.auto.qml" },
   "barWidget": {
-    "displayName": "Shahid's Workstation",
+    "displayName": "Workshop",
     "description": "Drive mounts, local AI, config backup, and app shortcuts",
     "category": "AI",
     "allowMultiple": false
@@ -104,17 +104,17 @@ Ui.Panel {
   property var details: ({})
   property int selected: 0
   readonly property bool compact: button.vertical || Quickshell.screens.some(screen => screen.width < 1050)
-  readonly property string summaryText: summary.total === undefined ? "Shahid’s Workstation" :
-    "Shahid’s Workstation · " + summary.mounted + "/" + summary.total + " drives · " +
+  readonly property string summaryText: summary.total === undefined ? "Workshop" :
+    "Workshop · " + summary.mounted + "/" + summary.total + " drives · " +
     (summary.ai === "online" ? "AI ready" : summary.ai === "offline" ? "AI offline" : "AI off") +
     (summary.backup === "due" ? " · Backup due" : "")
-  readonly property string narrowText: summary.total === undefined ? "Shahid’s Workstation" :
-    "Shahid’s Workstation · " + summary.mounted + "/" + summary.total +
+  readonly property string narrowText: summary.total === undefined ? "Workshop" :
+    "Workshop · " + summary.mounted + "/" + summary.total +
     (summary.ai === "online" ? " · AI" : summary.ai === "offline" ? " · AI ↓" : "") +
     (summary.backup === "due" ? " · !" : "")
   readonly property var actions: {
     const rows = [
-      { label: "Workstation menu", args: ["menu"] },
+      { label: "Workshop menu", args: ["menu"] },
       { label: "Apps and accounts", args: ["open", "menu"] }
     ]
     for (const drive of (root.details.drives || [])) {
@@ -234,7 +234,7 @@ Ui.Panel {
           spacing: Commons.Style.space(4)
           Ui.PanelSectionHeader {
             width: parent.width
-            text: "Shahid’s Workstation"
+            text: "Workshop"
           }
           Text {
             width: parent.width
@@ -479,7 +479,7 @@ const editorExtensions = { recommendations: ["oven.bun-vscode"] };
 function privateEditorWorkspace(): string {
   return JSON.stringify({
     // This folder contains generated editor metadata only. The config opens as a separate file.
-    folders: [{ path: ".", name: "Workstation configuration" }],
+    folders: [{ path: ".", name: "Workshop configuration" }],
     settings: {
       ...editorSettings,
       "files.autoSave": "off",
@@ -490,7 +490,7 @@ function privateEditorWorkspace(): string {
     tasks: {
       version: "2.0.0",
       tasks: [{
-        label: "Check workstation config",
+        label: "Check Workshop config",
         type: "process",
         command: bin,
         args: ["config", "check"],
@@ -646,12 +646,12 @@ function validateConfig(v: unknown): asserts v is WorkstationConfig {
 async function privateConfigBytes(): Promise<string> {
   const { open } = await import("node:fs/promises");
   const file = await open(conf, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => {
-    throw new Error("Cannot open the private workstation config. Run snshah apply to create it.");
+    throw new Error("Cannot open the private Workshop config. Run snshah apply to create it.");
   });
   try {
     const st = await file.stat();
     if (!st.isFile() || st.uid !== process.getuid?.() || (st.mode & 0o777) !== 0o600 || st.size > 256 * 1024)
-      throw new Error("Workstation config must be a regular file you own with mode 0600 and at most 256 KiB.");
+      throw new Error("Workshop config must be a regular file you own with mode 0600 and at most 256 KiB.");
     return await file.readFile("utf8");
   } finally { await file.close(); }
 }
@@ -661,7 +661,7 @@ async function interpretConfig(text: string): Promise<WorkstationConfig> {
   try {
     const js = new Bun.Transpiler({ loader: "ts" }).transformSync(text);
     result = (await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"))).default;
-  } catch { throw new Error("The workstation config could not be loaded. Check its TypeScript syntax and use only type imports."); }
+  } catch { throw new Error("The Workshop config could not be loaded. Check its TypeScript syntax and use only type imports."); }
   validateConfig(result);
   return result;
 }
@@ -682,7 +682,7 @@ function configSource(settings: WorkstationConfig): string {
   const { secrets, ...preferences } = settings;
   return [
     'import type { WorkstationConfig } from "./snshah.auto";',
-    "// This private TypeScript file is the workstation configuration. Keep mode 0600.",
+    "// This private TypeScript file is the Workshop configuration. Keep mode 0600.",
     beginSecrets, `const secrets = ${JSON.stringify(secrets, null, 2)} satisfies WorkstationConfig["secrets"];`, endSecrets,
     `const preferences = ${JSON.stringify(preferences, null, 2)} satisfies Omit<WorkstationConfig, "secrets">;`,
     "export default { ...preferences, secrets } satisfies WorkstationConfig;",
@@ -740,8 +740,8 @@ async function editConfig(): Promise<void> {
       await interpretConfig(next);
       previous = next;
       if (digest(next) !== await read(backupStamp))
-        await notify("Workstation config changed since its last encrypted backup.", true);
-    } catch { await notify("The workstation config could not be validated. Run Configuration → Check.").catch(() => {}); }
+        await notify("Workshop config changed since its last encrypted backup.", true);
+    } catch { await notify("The Workshop config could not be validated. Run Configuration → Check.").catch(() => {}); }
   }
   try { await run(["code", "--new-window", "--wait", editorWorkspace, conf]); }
   finally { watcher.close(); clearTimeout(timer); await saved(); }
@@ -769,7 +769,7 @@ async function setSecret(variable: string): Promise<void> {
   await interpretConfig(next);
   if (await privateConfigBytes() !== text) throw new Error("The config changed while the prompt was open.");
   await atomicFile(conf, next, 0o600);
-  await notify("Secret updated. Back up the workstation config.", true).catch(() => {});
+  await notify("Secret updated. Back up the Workshop config.", true).catch(() => {});
 }
 
 async function workspaceRoot(override?: string): Promise<string> {
@@ -905,7 +905,7 @@ async function plan(features: Features): Promise<Step[]> {
   if (!await exists(conf)) await file(conf, configSource(current), { private: true });
   if (!await exists(checkout)) steps.push({ kind: "checkout", path: checkout, repository: current.repository });
   else if (!await exists(join(checkout, ".git")) || !matchesRepository(capture(["git", "-C", checkout, "remote", "get-url", "origin"]), current.repository))
-    throw new Error(`Expected the workstation checkout at ${checkout}. Choose another --workspaces-root if this path is in use.`);
+    throw new Error(`Expected the Workshop checkout at ${checkout}. Choose another --workspaces-root if this path is in use.`);
 
 
   const enrollmentSource = await read(join(import.meta.dir, "ssh-enrollment.py")) ??
@@ -916,7 +916,7 @@ async function plan(features: Features): Promise<Step[]> {
   if (current.prompt.kind === "posh") {
     const source = await read(join(import.meta.dir, "snshah.omp.json")) ??
       await read(join(checkout, "snshah.omp.json")) ?? await read(theme);
-    if (source === undefined) throw new Error("Run setup from the workstation checkout to install the Oh My Posh theme.");
+    if (source === undefined) throw new Error("Run setup from the Workshop checkout to install the Oh My Posh theme.");
     if (!available("oh-my-posh")) steps.push({ kind: "command", id: "install-oh-my-posh", argv: ["omarchy", "pkg", "aur", "add", "oh-my-posh-bin"] });
     await file(theme, source);
   } else {
@@ -926,7 +926,7 @@ async function plan(features: Features): Promise<Step[]> {
   const bashrc = join(home, ".bashrc");
   await file(bashrc, upsertBlock(await read(bashrc) ?? "", beginShell, endShell, shellBlock("bash")));
   const hypr = join(config, "hypr");
-  if (!await exists(join(hypr, "hyprland.lua"))) throw new Error("This workstation profile requires Omarchy Quattro with Hyprland Lua.");
+  if (!await exists(join(hypr, "hyprland.lua"))) throw new Error("This Workshop profile requires Omarchy Quattro with Hyprland Lua.");
   const bindings = join(hypr, "bindings.lua");
   const bindingFile = join(hypr, "snshah.auto.lua");
   await file(bindingFile, `o.bind("SUPER + ALT + M", "${product}", "snshah menu")\n`);
@@ -961,14 +961,21 @@ async function plan(features: Features): Promise<Step[]> {
   if (await exists(apps)) {
     const active = new Set(current.work.map(tenant => tenant.id));
     const prefix = product + " ";
+    const legacyPrefix = "Shahid's Workstation ";
     for (const entry of (await readdir(apps, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
-      if (!entry.isFile() || !entry.name.startsWith(prefix)) continue;
-      const match = /^(Outlook|OneDrive) \(([a-z][a-z0-9-]{0,47})\)\.desktop$/.exec(entry.name.slice(prefix.length));
-      if (!match || active.has(match[2])) continue;
+      if (!entry.isFile()) continue;
+      const legacy = entry.name.startsWith(legacyPrefix);
+      if (!legacy && !entry.name.startsWith(prefix)) continue;
+      const suffix = entry.name.slice(legacy ? legacyPrefix.length : prefix.length);
+      const match = /^(Outlook|OneDrive) \(([a-z][a-z0-9-]{0,47})\)\.desktop$/.exec(suffix);
+      let command: string;
+      if (legacy && suffix === "ChatGPT Dot.desktop") command = "snshah open dot";
+      else if (match && (legacy || !active.has(match[2]))) command = `snshah open ${match[2]} ${match[1].toLowerCase()}`;
+      else continue;
       const path = join(apps, entry.name);
       const previous = await read(path);
-      if (previous?.includes(`\nName=${entry.name.slice(0, -8)}\n`) &&
-        previous.includes(`\nExec=snshah open ${match[2]} ${match[1].toLowerCase()}\n`))
+      const lines = previous?.split("\n");
+      if (previous !== undefined && lines?.includes(`Name=${entry.name.slice(0, -8)}`) && lines.includes(`Exec=${command}`))
         steps.push({ kind: "remove", path, previous });
     }
   }
@@ -1145,7 +1152,7 @@ async function openApp(app: PersonalApp): Promise<void> {
           actions.set(`${tenantLabel} · ${label}`, { kind: "work", tenant: id, app });
       }
       const argv = available("omarchy-menu-select")
-        ? ["omarchy-menu-select", "Workstation accounts", ...actions.keys()]
+        ? ["omarchy-menu-select", "Workshop accounts", ...actions.keys()]
         : ["gum", "choose", "--header", product, ...actions.keys()];
       const child = Bun.spawn(argv, { stdin: "inherit", stdout: "pipe", stderr: "inherit" });
       const [selection, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
@@ -1252,7 +1259,7 @@ async function restore(command: Extract<Command, { kind: "restore" | "verify" }>
   }
   if (await child.exited !== 0) throw new Error("Vault decryption failed.");
   const bytes = Buffer.concat(fragments).toString("utf8");
-  if (!bytes.startsWith(vaultMagic)) throw new Error("Snapshot must contain exactly one workstation config.");
+  if (!bytes.startsWith(vaultMagic)) throw new Error("Snapshot must contain exactly one Workshop config.");
   const text = bytes.slice(vaultMagic.length);
   // Treat restored TypeScript as code. Verify syntax without evaluating it.
   try { new Bun.Transpiler({ loader: "ts" }).transformSync(text); }
@@ -1327,7 +1334,7 @@ function menuSections(work: readonly Tenant[]): MenuSection[] {
       { id: "apply", label: "Apply changes", args: ["apply"], terminal: true },
       { id: "applyjson", label: "Apply changes (JSON)", args: ["apply", "--json"], terminal: true },
       { id: "doctor", label: "Diagnostics", args: ["doctor"], terminal: true },
-      { id: "status", label: "Workstation status", args: ["status", "--details"], terminal: true },
+      { id: "status", label: "Workshop status", args: ["status", "--details"], terminal: true },
       { id: "json", label: "Diagnostics (JSON)", args: ["doctor", "--json"], terminal: true },
       { id: "workspace", label: "Workspace path", args: ["workspace"], terminal: true },
       { id: "context", label: "Shell context", args: ["context"], terminal: true },
@@ -1343,7 +1350,7 @@ function menuSections(work: readonly Tenant[]): MenuSection[] {
     ] },
     { id: "plugin", label: "Plugin", actions: [
       { id: "install", label: "Install or refresh bar shortcut", args: ["plugin", "install"], terminal: true },
-      { id: "toggle", label: "Open workstation menu", args: ["plugin", "toggle"] },
+      { id: "toggle", label: "Open Workshop menu", args: ["plugin", "toggle"] },
       { id: "remove", label: "Remove bar shortcut", args: ["plugin", "remove"], terminal: true },
     ] },
   ];
@@ -1374,7 +1381,7 @@ async function menu(command: Extract<Command, { kind: "menu" }>): Promise<void> 
   if (!command.id) { await run(["omarchy", "menu", "summon", menuId]); return; }
   const action = menuSections((await settings()).work).flatMap(section => section.actions.map(item => ({ ...item, id: `${section.id}.${item.id}` })))
     .find(item => item.id === command.id);
-  if (!action) throw new Error("Unknown workstation menu action.");
+  if (!action) throw new Error("Unknown Workshop menu action.");
   if (action.terminal && !command.terminal) {
     launch(["omarchy-launch-terminal", bin, "menu", "run", action.id, "--terminal"]);
     return;
@@ -1400,7 +1407,7 @@ async function menu(command: Extract<Command, { kind: "menu" }>): Promise<void> 
         argv.push("--overwrite");
       }
     }
-    if (command.id === "plugin.remove" && !await confirm("Remove the workstation bar shortcut?")) return;
+    if (command.id === "plugin.remove" && !await confirm("Remove the Workshop bar shortcut?")) return;
     await execute(parse(argv));
   }
   if (action.terminal && process.stdin.isTTY) await promptInput("Press Enter to close").catch(() => {});
@@ -1413,7 +1420,7 @@ async function configure(action: "edit" | "check" | "setup"): Promise<void> {
   if (action === "edit") return editConfig();
   const previous = await privateConfigBytes();
   const current = await interpretConfig(previous);
-  if (action === "check") { console.log("Workstation config is valid."); return; }
+  if (action === "check") { console.log("Workshop config is valid."); return; }
   const personal = await promptInput("Personal profile display name");
   if (personal) current.personal = personal;
   for (const tenant of current.work) {
@@ -1425,7 +1432,7 @@ async function configure(action: "edit" | "check" | "setup"): Promise<void> {
   if (await privateConfigBytes() !== previous) throw new Error("Config changed during setup.");
   await atomicFile(conf, configSource(current), 0o600);
   await atomicFile(menuPath, await menuContent((await settings()).work));
-  await notify("Profile names updated. Back up the workstation config.", true).catch(() => {});
+  await notify("Profile names updated. Back up the Workshop config.", true).catch(() => {});
 }
 
 async function plugin(action: "install" | "remove" | "toggle"): Promise<void> {
@@ -1606,10 +1613,16 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const bootstrap = published
       ? ["bash", "-o", "pipefail", "-c", 'curl -fsSL https://raw.githubusercontent.com/shah/workshop/main/bootstrap.sh | sh -s -- "$@"', "--", ...flags]
       : ["sh", "bootstrap.sh", ...flags];
-    assert.match(invoke(...bootstrap), /Shahid's Workstation setup complete/);
+    assert.match(invoke(...bootstrap), /Workshop setup complete/);
     assert.equal(invoke("snshah", "workspace"), checkoutPath(root) + "\n");
     assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     assert.equal(invoke(...bootstrap), "No changes needed.\n");
+    const oldDot = join(desktop, "Shahid's Workstation ChatGPT Dot.desktop");
+    await writeFile(oldDot, "[Desktop Entry]\nName=Shahid's Workstation ChatGPT Dot\nExec=snshah open dot\n");
+    assert.match(invoke("snshah", "apply"), /Workshop setup complete/);
+    assert(await exists(join(desktop, "Workshop ChatGPT Dot.desktop")));
+    assert(!await exists(oldDot));
+    assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
     const rc = await readFile(join(fixture, ".bashrc"), "utf8");
     assert(rc.startsWith(bashrc));
     assert.equal(rc.match(/>>> snshah shell >>>/g)?.length, 1);
@@ -1761,7 +1774,7 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert.deepEqual(editorArgs, ["--new-window", "--wait", workspacePath, fixtureConf]);
     assert.equal(workspace.settings["[typescript]"]["editor.formatOnSave"], true);
     assert.equal(workspace.settings["workbench.localHistory.enabled"], false);
-    assert.deepEqual(workspace.folders, [{ path: ".", name: "Workstation configuration" }]);
+    assert.deepEqual(workspace.folders, [{ path: ".", name: "Workshop configuration" }]);
     assert.deepEqual(workspace.tasks.tasks[0].args, ["config", "check"]);
     assert.deepEqual(workspace.extensions, editorExtensions);
     assert.deepEqual(JSON.parse(await readFile(join(source, ".vscode/settings.json"), "utf8")), editorSettings);
@@ -1783,11 +1796,11 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     await mkdir(join(fresh, ".config/hypr"), { recursive: true });
     await writeFile(join(fresh, ".config/hypr/hyprland.lua"), "");
     env.HOME = fresh;
-    assert.match(invoke("bun", import.meta.path, "apply"), /Shahid's Workstation setup complete/);
+    assert.match(invoke("bun", import.meta.path, "apply"), /Workshop setup complete/);
     assert(await exists(checkoutPath(join(fresh, "Work"))));
     assert(await exists(join(fresh, ".config/oh-my-posh/snshah.auto.omp.json")));
     const freshBin = join(fresh, ".local/bin/snshah");
     assert.equal(invoke(freshBin, "plan", "--json"), "[]\n");
-    console.log("Workstation self-test passed.");
+    console.log("Workshop self-test passed.");
   } finally { await rm(fixture, { recursive: true, force: true }); }
 }
