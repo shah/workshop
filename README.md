@@ -48,17 +48,17 @@ Run `snshah --help` for the full command list and `snshah ssh --help` for a comm
 
 Setup checks for existing apps and launchers before using Omarchy's installers. Run `snshah plan` to see what is missing.
 
-| Default                                            | Installation path                                                                                                                     |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| OpenSSH                                            | Workshop enables key-only OpenSSH on port 22 at installation and uses Omarchy’s standard rate-limited SSH rule when UFW is installed. |
-| Bun                                                | `omarchy pkg add bun`, with `omarchy pkg aur add bun-bin` as fallback, before the CLI runs                                            |
-| VS Code                                            | `omarchy install editor vscode` when `code` is missing                                                                                |
-| Microsoft Edge                                     | `omarchy install browser edge`, then `omarchy default browser edge`                                                                   |
-| Oh My Posh                                         | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme                                                                   |
-| age, Herdr, rclone, FUSE                           | `omarchy pkg add` when missing                                                                                                        |
-| Spotify                                            | `omarchy install service spotify` if a client or web launcher is missing                                                              |
-| WhatsApp and Discord                               | Existing enabled launchers, or Omarchy web apps if missing or hidden                                                                  |
-| Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`.                                                                                |
+| Default                                            | Installation path                                                                                          |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| OpenSSH                                            | Workshop enables OpenSSH on port 22 for private LAN access by key or password. Root SSH login is disabled. |
+| Bun                                                | `omarchy pkg add bun`, with `omarchy pkg aur add bun-bin` as fallback, before the CLI runs                 |
+| VS Code                                            | `omarchy install editor vscode` when `code` is missing                                                     |
+| Microsoft Edge                                     | `omarchy install browser edge`, then `omarchy default browser edge`                                        |
+| Oh My Posh                                         | `omarchy pkg aur add oh-my-posh-bin`, with the bundled prompt theme                                        |
+| age, Herdr, rclone, FUSE                           | `omarchy pkg add` when missing                                                                             |
+| Spotify                                            | `omarchy install service spotify` if a client or web launcher is missing                                   |
+| WhatsApp and Discord                               | Existing enabled launchers, or Omarchy web apps if missing or hidden                                       |
+| Gmail, Google Voice, Cloudflare Admin, UniFi Admin | Omarchy web apps. UniFi opens `https://unifi.ui.com/`.                                                     |
 
 Ollama and local OpenCode are opt-in. Setup creates the personal OneDrive mount directory and mounts an already-configured remote when available. First-time Microsoft sign-in remains interactive.
 
@@ -207,17 +207,36 @@ Setup fills unset defaults, preserves explicit settings, and adds the same routi
 - `snshah agent claude /path/to/worktree` and `snshah agent codex /path/to/worktree` use your Omarchy-managed runtimes.
 - To run local OpenCode, set `localAI` to `ollama` in the config and run `snshah plan` and `snshah apply`. Then run `snshah agent local`.
 
-## Enroll another PC for SSH
+## Connect to Workshop over LAN SSH
 
-Workshop setup starts key-only OpenSSH on port 22 and enables it at boot. Enroll a device to authorize its key for your account. Enrollment listens on port 2222 by default. If that port is busy, run `snshah ssh enroll --random-port` to use an OS-assigned port. Enrollment uses a short-lived SSH password prompt. Enter the four-character code displayed on the Workshop PC at the password prompt. The code is case-insensitive and accepts up to five attempts. Ordinary SSH uses the enrolled key.
+Workshop setup starts OpenSSH on port 22 and enables it at boot. The installer selects the private IPv4 subnet on the default-route interface, or the only private IPv4 subnet if there is no default route. OpenSSH accepts the Workshop Linux account from that subnet using either its public key or its normal login password. Root SSH login is disabled. Workshop adds a subnet-scoped UFW rule when UFW is installed.
 
-1. **On the Workshop PC**, open **Workshop → Remote Access → Enroll a device** or run `snshah ssh enroll` in a local terminal. Select the LAN address that both PCs can reach. Bun fetches the pinned SSH library on first use. If UFW is active, approve the sudo prompt for the temporary subnet-scoped rule.
-2. **On the new PC**, run the displayed `ssh -p 2222 enroll@HOSTNAME` command, or the displayed port if you used `--random-port`. If the new PC cannot resolve the hostname, use the displayed LAN IP command. Compare the fingerprint shown by SSH with the one displayed on the Workshop PC before accepting it, then enter the one-time code. Choose Windows PowerShell, macOS, or Linux / WSL. Follow the displayed commands in a second terminal and paste the single Ed25519 **public key** line into the enrollment session. After you press Enter, the session shows the accepted key, its fingerprint, and the next step on the Workshop PC.
-3. **Back on the Workshop PC**, match the fingerprint shown on both screens and enter a device name such as `travel-laptop` to approve it. Press Enter to deny. The enrollment listener closes after the request finishes or the five-minute window expires.
-4. **If the regular SSH service was stopped**, enrollment starts it after approval. You can also run `snshah ssh enable` on the Workshop PC to enable regular SSH or display its host-key fingerprints.
-5. **On the new PC**, run the hostname-based SSH command shown after approval, or use the LAN IP fallback. Verify the regular SSH host fingerprint when prompted. If you reused an existing key, point `ssh -i` at that key. For VS Code Remote SSH, connect to the same account, address, and identity.
+**Workshop SSH is designed for a private LAN. Keep it off the public internet.** Avoid forwarding port 22 or exposing it through a public tunnel. Use a private VPN to reach the approved subnet from elsewhere. Re-run `snshah apply` on the Workshop PC if its LAN subnet changes.
 
-Use **Remote Access → List enrolled devices** or `snshah ssh list` to see device names and fingerprints. To revoke a device, choose **Revoke a device** or run `snshah ssh revoke travel-laptop`. Revocation blocks new connections with that key. An open SSH session remains connected.
+1. **On Workshop**, note your Linux username and hostname. Get the host-key fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. If the other PC cannot resolve the hostname, use the Workshop LAN IP printed during setup.
+2. **On the client**, generate a key with `ssh-keygen -t ed25519` if you do not already have one. Keep the private key on this client. On macOS and Linux, use the first password-authenticated connection to install the public key:
+
+   ```sh
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub user@workshop-host
+   ```
+
+   Compare the server fingerprint with the Workshop fingerprint before accepting it, then enter your Workshop Linux password. A plain password login cannot copy a key automatically. `ssh-copy-id` includes the client's public key as part of this first connection.
+
+   In Windows PowerShell with OpenSSH, the equivalent is:
+
+   ```powershell
+   $target = "user@workshop-host"
+   Get-Content "$HOME/.ssh/id_ed25519.pub" |
+     ssh -o PreferredAuthentications=password $target 'umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && key=$(tr -d "\r") && test -n "$key" && { grep -qxF -- "$key" ~/.ssh/authorized_keys || printf "%s\n" "$key" >> ~/.ssh/authorized_keys; }'
+   ```
+
+3. **Verify key login from the client.** This test fails if the key is rejected, without falling back to a password:
+
+   ```sh
+   ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME/.ssh/id_ed25519" user@workshop-host
+   ```
+
+For VS Code Remote SSH, use the same hostname, Linux account, and identity. If a device is lost, remove its public-key line from `~/.ssh/authorized_keys` on Workshop. The LAN password option remains available for that account.
 
 ## Encrypted vault
 
