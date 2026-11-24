@@ -114,6 +114,7 @@ type Command =
       kind: "ssh";
       action: "enroll" | "devices" | "revoke" | "enable";
       device?: string;
+      randomPort?: boolean;
     }
   | { kind: "status"; details: boolean }
   | { kind: "shell"; shell: "bash" | "zsh" }
@@ -158,7 +159,7 @@ const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
 const product = "Workshop";
-const cliVersion = "0.3.0";
+const cliVersion = "0.4.0";
 const defaultRepository = "shah/workshop";
 const defaultWorkspaceRoot = join(home, "Work");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
@@ -579,9 +580,15 @@ async function dispatchCli(
     });
 
   const ssh = group("ssh", "🔑", "Enroll and manage remote devices");
-  command(ssh, "enroll", "➕", "Start a one-time enrollment").action(() =>
-    dispatch({ kind: "ssh", action: "enroll" }),
-  );
+  command(ssh, "enroll", "➕", "Start a one-time enrollment on port 2222")
+    .option("--random-port", "Use an OS-assigned port")
+    .action((options: { randomPort?: boolean }) =>
+      dispatch({
+        kind: "ssh",
+        action: "enroll",
+        randomPort: !!options.randomPort,
+      }),
+    );
   command(ssh, "devices", "💻", "List enrolled devices")
     .alias("list")
     .action(() => dispatch({ kind: "ssh", action: "devices" }));
@@ -3672,7 +3679,12 @@ function enrollmentSshCommands(
     : `${primary}\nIf the hostname does not resolve: ${executable} ${account}@${address}`;
 }
 
-async function enrollSshDevice(directory: string): Promise<void> {
+const defaultEnrollmentPort = 2222;
+
+async function enrollSshDevice(
+  directory: string,
+  randomPort: boolean,
+): Promise<void> {
   if (process.getuid!() === 0 || !process.stdin.isTTY || !process.stdout.isTTY)
     throw new Error("Open enrollment from a regular user's local terminal.");
   const dependency = "ssh2@1.17.0";
@@ -3898,8 +3910,20 @@ async function enrollSshDevice(directory: string): Promise<void> {
   process.on("SIGTERM", cancel);
   try {
     await new Promise<void>((resolve, reject) => {
-      listener.once("error", reject);
-      listener.listen(0, choice.address, resolve);
+      listener.once("error", (error: NodeJS.ErrnoException) => {
+        reject(
+          !randomPort && error.code === "EADDRINUSE"
+            ? new Error(
+                `Enrollment port ${defaultEnrollmentPort} is already in use. Try snshah ssh enroll --random-port.`,
+              )
+            : error,
+        );
+      });
+      listener.listen(
+        randomPort ? 0 : defaultEnrollmentPort,
+        choice.address,
+        resolve,
+      );
     });
     const port = (listener.address() as AddressInfo).port;
     cleanupFirewall = await enrollmentFirewall(
@@ -4038,7 +4062,8 @@ async function workshopSsh(
   command: Extract<Command, { kind: "ssh" }>,
 ): Promise<void> {
   const directory = join(home, ".ssh");
-  if (command.action === "enroll") return enrollSshDevice(directory);
+  if (command.action === "enroll")
+    return enrollSshDevice(directory, !!command.randomPort);
   if (command.action === "revoke") {
     const name = command.device ?? (await promptInput("Device name to revoke"));
     await revokeDevice(directory, name);
@@ -4646,6 +4671,19 @@ await Bun.write(output, Bun.file(process.env.HOME + "/update.auto.tar.gz"));
       ),
       "ssh -p 2222 enroll@workshop.local\nIf the hostname does not resolve: ssh -p 2222 enroll@192.168.11.3",
     );
+    assert.equal(defaultEnrollmentPort, 2222);
+    for (const randomPort of [false, true]) {
+      await dispatchCli(
+        ["ssh", "enroll", ...(randomPort ? ["--random-port"] : [])],
+        async (command) => {
+          assert.deepEqual(command, {
+            kind: "ssh",
+            action: "enroll",
+            randomPort,
+          });
+        },
+      );
+    }
     const subnet = enrollmentSubnet("192.168.11.3/24");
     assert.equal(subnet.cidr, "192.168.11.0/24");
     assert(
