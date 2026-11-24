@@ -1,8 +1,9 @@
-# Maintaining Shahid's Workstation
+# Maintaining Shahid's AI Agents Workshop
 
-## Resume after a reinstall
+## Set up a fresh PC
 
-- Use the [README](README.md) as the setup and acceptance runbook. The canonical checkout is `~/Work/github.com/shah/workstation`. The user can choose a different root in the private config or override it for a run with `--workspaces-root`. If the checkout exists, fetch and review its status first.
+- Use the [README](README.md) as the setup and acceptance runbook. The canonical checkout is `~/Work/github.com/shah/workshop`. The user can choose a different root in the private config or override it for a run with `--workspaces-root`. If the checkout exists, fetch and review its status first.
+- Check GitHub access from the PC's shell even if your harness can read the repo through a connector. Run package installs from a regular Omarchy terminal when sudo needs a password. Report any steps that remain pending.
 - Target Omarchy Quattro with Lua-based Hyprland. Prefer native Omarchy commands and verify them with `omarchy commands` on the installed version. Preserve existing user configuration and review `snshah plan` before applying changes to a live desktop.
 - Fresh installs use native Omarchy installers for VS Code, Edge, Oh My Posh, shared tools, Spotify, and missing web app launchers. Edge and Oh My Posh are the workstation defaults. The README lists the exact installation paths.
 - Personal OneDrive is prepared by default at `~/OneDrive/<username>`. Work mounts are opt-in via a tagged rclone profile. Keep mount directories unique, preserve read-only mounts, and let Microsoft sign-in happen interactively.

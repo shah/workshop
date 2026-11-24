@@ -48,7 +48,7 @@ type Step =
   | { kind: "file"; path: string; content: string; executable?: boolean; private?: boolean }
   | { kind: "command"; id: string; argv: string[] }
   | { kind: "wait"; service: "ollama" }
-  | { kind: "checkout"; path: string }
+  | { kind: "checkout"; path: string; repository: string }
   | { kind: "directory"; path: string }
   | { kind: "mount"; id: string; path: string; remote: string }
   | { kind: "editor" }
@@ -61,7 +61,7 @@ const bin = join(home, ".local/bin/snshah");
 const profileDir = join(config, "snshah");
 const assetDir = join(data, "snshah");
 const product = "Shahid's Workstation";
-const remote = "https://github.com/shah/workstation.git";
+const defaultRepository = "shah/workshop";
 const defaultWorkspaceRoot = join(home, "Work");
 const theme = join(config, "oh-my-posh/snshah.auto.omp.json");
 const pluginId = "shah.workstation";
@@ -526,6 +526,8 @@ export type WorkstationConfig = {
   work: readonly Tenant[];
   /** Absolute path that contains your managed repository checkouts. */
   workspacesRoot: string;
+  /** Default GitHub repository in owner/name form. */
+  repository: string;
   prompt: { kind: "starship" } | { kind: "posh" };
   browser: { kind: "omarchy" } | { kind: "edge-default" };
   localAI: { kind: "off" } | { kind: "ollama"; model: string };
@@ -548,6 +550,7 @@ type WorkstationConfig = {
   accounts: readonly AccountHint[];
   work: readonly Tenant[];
   workspacesRoot: string;
+  repository: string;
   prompt: { kind: "starship" } | { kind: "posh" };
   browser: { kind: "omarchy" } | { kind: "edge-default" };
   localAI: { kind: "off" } | { kind: "ollama"; model: string };
@@ -611,6 +614,8 @@ function validateConfig(v: unknown): asserts v is WorkstationConfig {
   }
   if (typeof v.workspacesRoot !== "string" || !isAbsolute(v.workspacesRoot) || /[\x00-\x1f]/.test(v.workspacesRoot))
     throw new Error("workspacesRoot must be an absolute path.");
+  if (typeof v.repository !== "string" || !/^[a-z0-9][a-z0-9-]*\/[a-z0-9_][a-z0-9_.-]*$/i.test(v.repository) || /\.git$/i.test(v.repository))
+    throw new Error("repository must be a GitHub owner/name without a .git suffix.");
   if (!object(v.prompt) || !member(["starship", "posh"], typeof v.prompt.kind === "string" ? v.prompt.kind : undefined))
     throw new Error("Invalid prompt choice.");
   if (!object(v.browser) || (v.browser.kind !== "omarchy" && v.browser.kind !== "edge-default"))
@@ -658,6 +663,7 @@ function initialConfig(features?: Features): WorkstationConfig {
   return {
     personal: "Personal", personalOneDrive: { username: userInfo().username, remote: "snshah-personal" }, accounts: [],
     work: [], workspacesRoot: features?.workspaceRoot ?? defaultWorkspaceRoot,
+    repository: defaultRepository,
     prompt: { kind: "posh" },
     browser: { kind: "edge-default" },
     localAI: features?.local ? { kind: "ollama", model: defaultModel } : { kind: "off" },
@@ -763,13 +769,17 @@ async function workspaceRoot(override?: string): Promise<string> {
   return override ?? (await settings()).workspacesRoot;
 }
 
-function checkoutPath(root: string): string { return join(root, "github.com/shah/workstation"); }
-
-function knownWorkstationRemote(url: string | undefined): boolean {
-  return /^((https|ssh):\/\/(git@)?github\.com\/|git@github\.com:)shah\/workstation(\.git)?$/.test(url ?? "");
+function checkoutPath(root: string, repository = defaultRepository): string {
+  return join(root, "github.com", repository);
 }
 
-async function createCheckout(path: string): Promise<void> {
+function matchesRepository(url: string | undefined, repository: string): boolean {
+  const slug = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)(.+)$/i.exec(url ?? "")?.[1];
+  return slug?.replace(/\.git$/i, "").toLowerCase() === repository.toLowerCase();
+}
+
+async function createCheckout(path: string, repository: string): Promise<void> {
+  const remote = `https://github.com/${repository}.git`;
   await mkdir(dirname(path), { recursive: true });
   const staging = await mkdtemp(join(dirname(path), ".workstation.auto.clone-"));
   try {
@@ -882,12 +892,12 @@ async function plan(features: Features): Promise<Step[]> {
   if (source === undefined) throw new Error("Cannot locate the snshah TypeScript script.");
   await file(bin, source, { executable: true });
   const root = features.workspaceRoot ?? current.workspacesRoot;
-  const checkout = checkoutPath(root);
+  const checkout = checkoutPath(root, current.repository);
   await file(declarations, configTypes);
   await file(editorWorkspace, privateEditorWorkspace(), { private: true });
   if (!await exists(conf)) await file(conf, configSource(current), { private: true });
-  if (!await exists(checkout)) steps.push({ kind: "checkout", path: checkout });
-  else if (!await exists(join(checkout, ".git")) || !knownWorkstationRemote(capture(["git", "-C", checkout, "remote", "get-url", "origin"])))
+  if (!await exists(checkout)) steps.push({ kind: "checkout", path: checkout, repository: current.repository });
+  else if (!await exists(join(checkout, ".git")) || !matchesRepository(capture(["git", "-C", checkout, "remote", "get-url", "origin"]), current.repository))
     throw new Error(`Expected the workstation checkout at ${checkout}. Choose another --workspaces-root if this path is in use.`);
 
 
@@ -1022,7 +1032,7 @@ async function apply(features: Features, json: boolean): Promise<void> {
         case "file": await atomicFile(step.path, step.content, step.private ? 0o600 : step.executable ? 0o755 : undefined); break;
         case "command": await run(step.argv, { quiet: json }); break;
         case "wait": await waitForOllama(); break;
-        case "checkout": await createCheckout(step.path); break;
+        case "checkout": await createCheckout(step.path, step.repository); break;
         case "remove":
           if (await read(step.path) === step.previous) await rm(step.path);
           break;
@@ -1422,7 +1432,11 @@ async function execute(command: Command): Promise<void> {
   switch (command.kind) {
     case "help": console.log(usage); return;
     case "shell": console.log(await shellCode(command.shell)); return;
-    case "workspace": console.log(checkoutPath(await workspaceRoot(command.root))); return;
+    case "workspace": {
+      const current = await settings();
+      console.log(checkoutPath(command.root ?? current.workspacesRoot, current.repository));
+      return;
+    }
     case "test": await selfTest(command.published); return;
     case "context":
       console.log(process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX || process.env.CLAUDECODE || process.env.OPENCODE ? "AGENT" :
@@ -1483,7 +1497,7 @@ async function selfTest(published: boolean): Promise<void> {
     await mkdir(join(fixture, ".config/opencode"));
     await mkdir(desktop, { recursive: true });
     await symlink(process.execPath, join(tools, "bun"));
-    for (const command of ["bash", "curl", "tar", "dirname", "mktemp", "rm", "cat", "sleep", "jq", "find", "id", "gzip", "omarchy-plugin-validate"]) {
+    for (const command of ["sh", "bash", "curl", "tar", "dirname", "mktemp", "rm", "cat", "sleep", "jq", "find", "id", "gzip", "omarchy-plugin-validate"]) {
       const path = Bun.which(command);
       if (path) await symlink(path, join(tools, command));
     }
@@ -1538,7 +1552,7 @@ else if (group === "webapp" && action === "install") {
 import { mkdirSync } from "node:fs";
 const argv = Bun.argv.slice(2);
 if (argv[0] === "clone") mkdirSync(argv.at(-1) + "/.git", { recursive: true });
-else if (argv[0] === "-C" && argv[2] === "remote") console.log("https://github.com/shah/workstation.git");
+else if (argv[0] === "-C" && argv[2] === "remote") console.log("https://github.com/shah/workshop.git");
 else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdout: "inherit", stderr: "inherit" }).exitCode ?? 1;
 `, { mode: 0o755 });
     for (const tool of ["gum", "herdr", "omarchy-shell", "fusermount3"])
@@ -1567,8 +1581,8 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     assert(JSON.parse(draft).some((step: { target: string }) => step.target === "default-browser"));
     assert(!JSON.parse(draft).some((step: { target: string }) => step.target === "webapp-discord"));
     const bootstrap = published
-      ? ["bash", "-o", "pipefail", "-c", 'curl -fsSL https://raw.githubusercontent.com/shah/workstation/main/bootstrap.sh | bash -s -- "$@"', "--", ...flags]
-      : ["bash", "bootstrap.sh", ...flags];
+      ? ["bash", "-o", "pipefail", "-c", 'curl -fsSL https://raw.githubusercontent.com/shah/workshop/main/bootstrap.sh | sh -s -- "$@"', "--", ...flags]
+      : ["sh", "bootstrap.sh", ...flags];
     assert.match(invoke(...bootstrap), /Shahid's Workstation setup complete/);
     assert.equal(invoke("snshah", "workspace"), checkoutPath(root) + "\n");
     assert.equal(invoke("snshah", "plan", "--json"), "[]\n");
@@ -1594,6 +1608,10 @@ else process.exitCode = Bun.spawnSync([${JSON.stringify(git)}, ...argv], { stdou
     const settings = await interpretConfig(freshConfig);
     const menuFile = join(fixture, ".config/omarchy/extensions/omarchy-menu.jsonc");
     assert.deepEqual(settings.work, []);
+    assert.equal(settings.repository, "shah/workshop");
+    await writeFile(fixtureConf, configSource({ ...settings, repository: "example/another-repo" }));
+    assert.equal(invoke("snshah", "workspace"), checkoutPath(root, "example/another-repo") + "\n");
+    await writeFile(fixtureConf, freshConfig);
     assert.equal(settings.prompt.kind, "posh");
     assert.equal(settings.browser.kind, "edge-default");
     const hints: WorkstationConfig = { ...settings, accounts: [{ kind: "gmail", username: "fixture@example.invalid" }] };

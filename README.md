@@ -1,31 +1,40 @@
-# Shahid's Workstation
+# Shahid's AI Agents Workshop
 
-A keyboard-first Omarchy Quattro profile for personal mail, any number of isolated Microsoft 365 tenants, OneDrive, ChatGPT Dot, and engineering agents. Run the same actions from the native Omarchy menu or the `snshah` CLI.
+Set up an Omarchy PC as a home for AI agents to clone repositories and run the jobs you assign, from the desktop or remotely. The workshop also includes desktop integrations for mail, Microsoft 365, OneDrive, and ChatGPT Dot.
 
 ![The workstation status widget in the Omarchy bar](docs/bar.png)
 
 ![The workstation submenu with example tenants](docs/menu.png)
 
-## Install
+## Set up a fresh Omarchy PC
 
-Use an Omarchy Quattro desktop with Lua-based Hyprland config. Run setup as your regular user. Package installation and system services may ask for sudo.
+Use an Omarchy Quattro desktop with Lua-based Hyprland. Run setup as your regular desktop user. Package installation and system services may ask for sudo.
+
+### A. Ask an agent
+
+Open Codex, Claude Code, or your preferred agent harness on the Omarchy PC and give it this prompt:
+
+> Set up this Omarchy PC using https://github.com/shah/workshop. Read the README and AGENTS.md, preview the changes, then apply them. Fix recoverable errors and tell me when you need me at the keyboard for sudo or sign-in. Verify the setup by cloning a test repo and starting an available agent in it. Report what passed and what remains.
+
+### B. Run the bootstrap
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shah/workstation/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/shah/workshop/main/bootstrap.sh | sh
 ```
 
-The bootstrap installs Bun if needed and runs the installer from a single Git revision. For a preview before applying:
+The bootstrap fetches one Git revision, installs Bun if needed, and runs the installer.
+
+### C. Run the installer from a clone
 
 ```bash
-mkdir -p ~/Work/github.com/shah
-git clone https://github.com/shah/workstation.git ~/Work/github.com/shah/workstation
-cd ~/Work/github.com/shah/workstation
-command -v bun >/dev/null || { omarchy pkg add bun || omarchy pkg aur add bun-bin; }
+git clone https://github.com/shah/workshop.git "$HOME/Work/github.com/shah/workshop"
+cd "$HOME/Work/github.com/shah/workshop"
+command -v bun >/dev/null || omarchy pkg add bun || omarchy pkg aur add bun-bin
 bun --no-env-file ./snshah.ts plan
 bun --no-env-file ./snshah.ts apply
 ```
 
-For an existing checkout, fetch and review the update before fast-forwarding. The default root is `~/Work`. Set `workspacesRoot` in your private config for a durable change, or pass `--workspaces-root "$HOME/Client Work"` to one `plan` or `apply`. On first installation, that flag seeds the config. `snshah workspace` prints the managed checkout path.
+The default workspace root is `~/Work`. Set `workspacesRoot` in your private config or pass `--workspaces-root "$HOME/Client Work"` to preview or apply with a different root. On first installation, that flag seeds the config. The generated `repository` setting uses `shah/workshop` as the example. Run `snshah workspace` to print the configured checkout path.
 
 ## Fresh-install defaults
 
@@ -90,6 +99,7 @@ Configuration options include:
 | `personal`, `work[].label` | Editable display names. |
 | `work[].id` | Stable, unique tenant ID. Use lowercase letters, digits, and hyphens, starting with a letter. |
 | `workspacesRoot` | Absolute path for managed checkouts |
+| `repository` | Default GitHub repository in `owner/name` form. Starts as `shah/workshop`. |
 | `browser` | `{ kind: "omarchy" }` or `{ kind: "edge-default" }` |
 | `prompt` | `{ kind: "starship" }` or `{ kind: "posh" }` using the bundled theme |
 | `localAI` | `{ kind: "off" }` or `{ kind: "ollama", model: "qwen3-coder:30b" }` |
